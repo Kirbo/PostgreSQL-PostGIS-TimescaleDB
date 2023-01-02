@@ -13,9 +13,9 @@ services:
     container_name: postgres
     restart: unless-stopped
     environment:
-      - POSTGRES_DB=postgres
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=homeassistant
+      - POSTGRES_USER=homeassistant
+      - POSTGRES_PASSWORD=homeassistant
     ports:
       - 5432:5432
     networks:
