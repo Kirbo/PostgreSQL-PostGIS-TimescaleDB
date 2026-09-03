@@ -1,0 +1,169 @@
+# Build, smoke-test and publish the PostgreSQL + PostGIS + TimescaleDB image.
+#
+# WHERE IT RUNS: the "Kirbo Mini" Mac Mini runner (docker executor, tag `macos`), never a
+# metered SaaS runner — `default: tags: [macos]` puts every job there. The docker jobs talk to
+# the host's Docker Desktop daemon through the mounted socket (DOCKER_HOST below), the same
+# way the electrolux-to-mqtt pipeline does; there is no docker-in-docker service.
+#
+# WHAT MAKES IT SELF-UPDATING: the `resolve versions` job runs scripts/resolve-versions.sh,
+# which asks Docker Hub / PGDG / packagecloud what the newest PostgreSQL + PostGIS +
+# TimescaleDB combination they all ship for is, and hands it downstream as a dotenv artifact.
+# A weekly pipeline schedule therefore republishes the image whenever ANY of the three moves —
+# and also rebuilds an unchanged combination so the Debian base picks up security updates.
+# Nothing here has to be edited to follow upstream; to freeze it instead, set
+# RESOLVE_MODE=pinned in versions.env and edit the numbers there.
+
+stages:
+  - resolve
+  - build
+  - publish
+  - sync
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    # One pipeline per change: MR pipelines win over branch pipelines when an MR is open.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS"
+      when: never
+    - if: "$CI_COMMIT_BRANCH"
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+variables:
+  # Docker Hub target. Change DOCKERHUB_REPOSITORY here (or as a CI/CD variable) to publish
+  # somewhere else — nothing else in the repo hardcodes it.
+  DOCKER_REGISTRY: docker.io
+  DOCKERHUB_REPOSITORY: kirbownz/postgresql-postgis-timescaledb
+  # One buildx builder per job, torn down in after_script — a leaked buildkit container on the
+  # Mac would otherwise keep its cache volume alive forever.
+  DOCKER_BUILDER_NAME: "ppt-builder-${CI_JOB_ID}"
+  GIT_DEPTH: "10"
+
+default:
+  tags:
+    - macos
+  interruptible: true
+
+# --- shared bits -------------------------------------------------------------------------
+
+.docker:
+  image: docker:cli
+  cache: []
+  variables:
+    DOCKER_HOST: "unix:///var/run/docker.sock"
+  before_script:
+    - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
+    - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1
+      || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+  after_script:
+    # after_script runs in a fresh shell: BUILDER_NAME from before_script is gone here, so use
+    # the pipeline-level variable directly or every job leaks a buildkit container.
+    - docker buildx rm "${DOCKER_BUILDER_NAME}" >/dev/null 2>&1 || true
+
+# Publishing happens on the default branch, on schedules, and on a "Run pipeline" that sets
+# PUBLISH (any value) — never from a feature branch or MR, which only build and test.
+.publish_rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+    - if: '$CI_PIPELINE_SOURCE == "web" && $PUBLISH'
+    - when: never
+
+# --- resolve -----------------------------------------------------------------------------
+
+resolve versions:
+  stage: resolve
+  image: alpine:3
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - sh scripts/resolve-versions.sh build.env
+  artifacts:
+    # dotenv: later jobs get PG_VERSION/POSTGIS_VERSION/... as environment variables.
+    # paths:  the same values as a file, because the scripts source ./build.env directly.
+    reports:
+      dotenv: build.env
+    paths:
+      - build.env
+    expire_in: 1 week
+
+# --- build + test ------------------------------------------------------------------------
+
+# Builds for the runner's own architecture only (arm64 on the Mac) and actually RUNS the
+# result: versions asserted, a hypertable filled, a spatial index queried. A red job here
+# means nothing gets pushed — the publish job needs this one.
+build and test image:
+  extends: .docker
+  stage: build
+  needs:
+    - job: resolve versions
+      artifacts: true
+  variables:
+    LOCAL_TAG: "postgresql-postgis-timescaledb:ci-${CI_PIPELINE_ID}"
+  script:
+    - sh scripts/docker-buildx-release.sh test
+    - sh scripts/smoke-test.sh "${LOCAL_TAG}"
+  after_script:
+    - docker rmi "postgresql-postgis-timescaledb:ci-${CI_PIPELINE_ID}" >/dev/null 2>&1 || true
+    - docker buildx rm "${DOCKER_BUILDER_NAME}" >/dev/null 2>&1 || true
+
+# --- publish -----------------------------------------------------------------------------
+
+publish image:
+  extends:
+    - .docker
+    - .publish_rules
+  stage: publish
+  # Pushing the release image must not be auto-cancelled halfway by a new commit.
+  interruptible: false
+  needs:
+    - job: resolve versions
+      artifacts: true
+    - job: build and test image
+      artifacts: false
+  before_script:
+    # Credentials: DOCKERHUB_USERNAME/DOCKERHUB_TOKEN, or the CI_REGISTRY_USERNAME/
+    # CI_REGISTRY_PASSWORD names used by the other KirboDev image repos — whichever is set.
+    - export DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-${CI_REGISTRY_USERNAME:-}}"
+    - export DOCKERHUB_TOKEN="${DOCKERHUB_TOKEN:-${CI_REGISTRY_PASSWORD:-}}"
+    - |
+      if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_TOKEN}" ]; then
+        echo "ERROR: set DOCKERHUB_USERNAME + DOCKERHUB_TOKEN (masked) in Settings -> CI/CD -> Variables" >&2
+        exit 1
+      fi
+    - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
+    - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1
+      || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+    - echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKER_REGISTRY}"
+  script:
+    - sh scripts/docker-buildx-release.sh publish
+  after_script:
+    - docker logout "${DOCKER_REGISTRY}" || true
+    - docker buildx rm "${DOCKER_BUILDER_NAME}" >/dev/null 2>&1 || true
+
+# --- sync ---------------------------------------------------------------------------------
+
+# Optional bookkeeping: write the versions that were just published back into versions.env and
+# README.md, so the repo states what :latest actually contains and `git log` becomes the
+# upgrade history. Runs only when a project access token (api + write_repository, Maintainer,
+# allowed to push to the protected default branch) is stored as VERSIONS_PUSH_TOKEN; without
+# that variable the job simply does not exist and everything else still works.
+# The push carries -o ci.skip so this commit does not start another pipeline.
+sync versions.env:
+  stage: sync
+  image: alpine:3
+  interruptible: false
+  needs:
+    - job: resolve versions
+      artifacts: true
+    - job: publish image
+      artifacts: false
+  rules:
+    - if: "$VERSIONS_PUSH_TOKEN && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+    - when: never
+  before_script:
+    - apk add --no-cache git
+  script:
+    - sh scripts/sync-versions.sh

@@ -1,4 +1,5 @@
-version: '3'
+# Minimal stack for trying the image out: `docker compose up`.
+name: postgresql-postgis-timescaledb
 
 networks:
   overlay:
@@ -9,7 +10,7 @@ volumes:
 
 services:
   postgres:
-    image: binakot/postgresql-postgis-timescaledb:latest
+    image: kirbownz/postgresql-postgis-timescaledb:latest
     container_name: postgres
     restart: unless-stopped
     environment:
@@ -21,7 +22,17 @@ services:
     networks:
       - overlay
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      # PostgreSQL 18's official image moved PGDATA to /var/lib/postgresql/18/docker and
+      # declares the VOLUME one level up, so the mount point is /var/lib/postgresql — NOT
+      # /var/lib/postgresql/data as it was for PostgreSQL <= 17.
+      - pg_data:/var/lib/postgresql
+    healthcheck:
+      # The image ships its own pg_isready healthcheck; this only shortens the start period.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 #  pgadmin:
 #    image: dpage/pgadmin4:latest
@@ -34,3 +45,6 @@ services:
 #      - 5433:80
 #    networks:
 #      - overlay
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
