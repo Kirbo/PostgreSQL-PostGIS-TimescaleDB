@@ -8,9 +8,11 @@ built for `linux/amd64` and `linux/arm64`.
 ## Current versions
 
 <!-- versions:start -->
+
 * **PostgreSQL 18.6** — [release notes](https://www.postgresql.org/docs/release/)
 * **PostGIS 3.6.4** — [release notes](https://github.com/postgis/postgis/releases/tag/3.6.4)
 * **TimescaleDB 2.29.2** — [release notes](https://github.com/timescale/timescaledb/releases/tag/2.29.2)
+
 <!-- versions:end -->
 
 Built on the official [`postgres`](https://hub.docker.com/_/postgres) image (Debian trixie).
@@ -21,13 +23,15 @@ install rather than a source compile, on both architectures.
 
 ## Tags
 
+<!-- tags:start -->
+
 | Tag | Points at |
 | --- | --- |
-<!-- tags:start -->
 | `latest` | the newest build |
 | `18` | newest build of that PostgreSQL major |
 | `18.6` | newest build of that PostgreSQL version |
 | `18.6-postgis3.6.4-timescaledb2.29.2` | that exact version combination |
+
 <!-- tags:end -->
 
 All four are the same digest from one build. They are pushed most-specific first and `latest`

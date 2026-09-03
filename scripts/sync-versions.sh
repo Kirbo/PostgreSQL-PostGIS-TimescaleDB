@@ -40,9 +40,11 @@ set_var DEBIAN_SUITE "$NEW_SUITE" versions.env
 awk -v pg="$NEW_PG" -v gis="$NEW_GIS" -v ts="$NEW_TS" '
   /<!-- versions:start -->/ {
     print
+    print ""
     print "* **PostgreSQL " pg "** — [release notes](https://www.postgresql.org/docs/release/)"
     print "* **PostGIS " gis "** — [release notes](https://github.com/postgis/postgis/releases/tag/" gis ")"
     print "* **TimescaleDB " ts "** — [release notes](https://github.com/timescale/timescaledb/releases/tag/" ts ")"
+    print ""
     skip = 1
     next
   }
@@ -53,10 +55,14 @@ awk -v pg="$NEW_PG" -v gis="$NEW_GIS" -v ts="$NEW_TS" '
 awk -v maj="$NEW_PG_MAJOR" -v pg="$NEW_PG" -v gis="$NEW_GIS" -v ts="$NEW_TS" '
   /<!-- tags:start -->/ {
     print
+    print ""
+    print "| Tag | Points at |"
+    print "| --- | --- |"
     print "| `latest` | the newest build |"
     print "| `" maj "` | newest build of that PostgreSQL major |"
     print "| `" pg "` | newest build of that PostgreSQL version |"
-    print "| `" pg "-postgis" gis "-timescaledb" ts "` | one exact, immutable combination |"
+    print "| `" pg "-postgis" gis "-timescaledb" ts "` | that exact version combination |"
+    print ""
     skip = 1
     next
   }
