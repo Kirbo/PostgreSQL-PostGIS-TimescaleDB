@@ -58,6 +58,28 @@ For a new TimescaleDB database, create the extension in it directly —
 using a database with TimescaleDB installed as a `TEMPLATE`, which is why this image no longer
 creates a `template_timescaledb` (older `binakot/*` tags did).
 
+### Home Assistant: LTSS / LTSS Turbo
+
+This is the combination [LTSS](https://github.com/freol35241/ltss) and
+[LTSS Turbo](https://github.com/velaar/ltss-turbo) need — nothing LTSS-specific is baked into
+the image, both just want PostGIS and TimescaleDB in the same server:
+
+```yaml
+ltss_turbo:
+  db_url: postgresql://homeassistant:password@postgres:5432/homeassistant
+```
+
+`CREATE EXTENSION` is issued by the integration itself, so any database works; the compose
+file's `homeassistant` database already has both extensions loaded.
+
+Their DDL is part of the smoke test, so the weekly auto-update cannot quietly break it: the
+legacy positional `create_hypertable()` signature, the pre-hypercore `timescaledb.compress`
+table options with `add_compression_policy`/`add_retention_policy`, a GIST index over a PostGIS
+point column, an EWKT insert, chunk compression, and a `time_bucket()` aggregation are all
+replayed and asserted on every build. All of it still works on PostgreSQL 18 / TimescaleDB
+2.29 — the only complaint is TimescaleDB's cosmetic "use TEXT instead of VARCHAR" hint, which
+comes from LTSS's own schema.
+
 ### Upgrading from an image based on PostgreSQL ≤ 17
 
 Two breaking changes, both from upstream:
