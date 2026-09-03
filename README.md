@@ -27,8 +27,11 @@ install rather than a source compile, on both architectures.
 | `latest` | the newest build |
 | `18` | newest build of that PostgreSQL major |
 | `18.6` | newest build of that PostgreSQL version |
-| `18.6-postgis3.6.4-timescaledb2.29.2` | one exact, immutable combination |
+| `18.6-postgis3.6.4-timescaledb2.29.2` | that exact version combination |
 <!-- tags:end -->
+
+All four are the same digest from one build. They are pushed most-specific first and `latest`
+last, so Docker Hub's last-pushed ordering puts `latest` at the top of the tag list.
 
 ## Usage
 

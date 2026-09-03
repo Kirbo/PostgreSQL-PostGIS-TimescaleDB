@@ -6,10 +6,17 @@
 #   publish  every arch in PLATFORMS, --push, with the full tag set.
 #
 # Tags pushed by `publish`:
-#   :latest                                                  moving, newest build
-#   :<PG_MAJOR>                                              e.g. 18 — track a major
+#   :<PG_VERSION>-postgis<X>-timescaledb<Y>                  the fully-qualified combo
 #   :<PG_VERSION>                                            e.g. 18.6
-#   :<PG_VERSION>-postgis<X>-timescaledb<Y>                  the immutable, fully-qualified combo
+#   :<PG_MAJOR>                                              e.g. 18 — track a major
+#   :latest                                                  moving, newest build
+#
+# They are listed (and passed to buildx) in that order ON PURPOSE. One build produces one
+# manifest-list digest and all four tags point at it, but buildx pushes the manifests in -t
+# order, a couple of seconds apart. Docker Hub's tag page sorts by last-pushed, so pushing
+# :latest LAST puts it at the top of
+# https://hub.docker.com/r/kirbownz/postgresql-postgis-timescaledb/tags — and the rest fall in
+# most-specific-last order beneath it.
 #
 # Inputs (env): DOCKER_REGISTRY, DOCKERHUB_REPOSITORY, BUILDER_NAME, LOCAL_TAG,
 #   CI_COMMIT_SHORT_SHA; versions from build.env (resolve-versions.sh) or versions.env.
@@ -34,7 +41,7 @@ case "$MODE" in
     PLATFORM_ARGS="--platform ${PLATFORMS}"
     # provenance + sbom: the pushed manifest records how and from what it was built.
     OUTPUT_ARGS="--push --provenance=true --sbom=true"
-    TAGS="-t ${IMAGE}:latest -t ${IMAGE}:${PG_MAJOR} -t ${IMAGE}:${PG_VERSION} -t ${IMAGE}:${COMBO}"
+    TAGS="-t ${IMAGE}:${COMBO} -t ${IMAGE}:${PG_VERSION} -t ${IMAGE}:${PG_MAJOR} -t ${IMAGE}:latest"
     ;;
   *)
     echo "ERROR: unknown mode '${MODE}' (expected test|publish)" >&2
