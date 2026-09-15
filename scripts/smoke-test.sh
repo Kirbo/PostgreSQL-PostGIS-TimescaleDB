@@ -74,8 +74,14 @@ assert_eq() { # assert_eq LABEL EXPECTED ACTUAL
 }
 
 echo "==> asserting versions"
-assert_eq "architecture" "${PLATFORM:-$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')}" \
-  "$(docker inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")"
+# Asked of the running container, not the daemon's image record: parallel jobs pull the same
+# digest for different platforms into one shared daemon, and the record follows the last pull.
+case "${PLATFORM:-$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')}" in
+  linux/amd64) want_arch=x86_64 ;;
+  linux/arm64) want_arch=aarch64 ;;
+  *) want_arch="" ;;
+esac
+[ -z "$want_arch" ] || assert_eq "architecture" "$want_arch" "$(docker exec "$NAME" uname -m)"
 assert_eq "postgresql"  "$PG_VERSION"          "$(q "SHOW server_version;" | cut -d' ' -f1)"
 assert_eq "postgis"     "$POSTGIS_VERSION"     "$(q "SELECT extversion FROM pg_extension WHERE extname = 'postgis';")"
 assert_eq "timescaledb" "$TIMESCALEDB_VERSION" "$(q "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';")"
