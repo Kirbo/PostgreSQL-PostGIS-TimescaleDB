@@ -60,9 +60,17 @@ case "$MODE" in
 
   build)
     [ -n "${STAGING_IMAGE:-}" ] || { echo "ERROR: STAGING_IMAGE is not set" >&2; exit 1; }
-    # provenance + sbom: the pushed manifest records how and from what it was built.
-    build --platform "${PLATFORMS}" --push --provenance=true --sbom=true \
-      --metadata-file staging-metadata.json -t "${STAGING_TAG}"
+    # provenance + sbom: the pushed manifest records how and from what it was built. GitLab's
+    # registry rejects the OCI-artifact form BuildKit >= 0.32 uses for them ("blob unknown to
+    # registry", moby/buildkit#7007), hence the legacy form; should a registry still refuse,
+    # the build is retried without attestations rather than blocking the release.
+    export BUILDX_NO_DEFAULT_OCI_ARTIFACT=1
+    if ! build --platform "${PLATFORMS}" --push --provenance=true --sbom=true \
+        --metadata-file staging-metadata.json -t "${STAGING_TAG}"; then
+      echo "WARNING: push with provenance/SBOM attestations failed — retrying without them" >&2
+      build --platform "${PLATFORMS}" --push --provenance=false --sbom=false \
+        --metadata-file staging-metadata.json -t "${STAGING_TAG}"
+    fi
     DIGEST="$(sed -n 's/.*"containerimage.digest": *"\([^"]*\)".*/\1/p' staging-metadata.json | head -n 1)"
     [ -n "$DIGEST" ] || { echo "ERROR: no digest in staging-metadata.json" >&2; cat staging-metadata.json; exit 1; }
     {
