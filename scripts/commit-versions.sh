@@ -1,14 +1,21 @@
 #!/bin/sh
-# sync-versions.sh — after a publish, write the versions that were actually built back into
-# versions.env and the README, and commit them to the default branch. Turns `git log` into the
-# upgrade history of the published image and keeps the repo honest about what :latest holds.
+# commit-versions.sh — write the versions the resolver found (build.env) into versions.env and
+# the README and push that as a commit to the default branch. The push starts an ordinary
+# branch pipeline, which builds, tests and publishes exactly what the commit says — so every
+# published image corresponds to a commit, `git log` is the upgrade history, and a bump can be
+# reverted like any other change.
 #
-# No-ops when nothing changed. Needs VERSIONS_PUSH_TOKEN (project access token, api +
-# write_repository, allowed to push to the protected default branch) — the CI job token cannot
-# push. The push uses `-o ci.skip` so this commit does not trigger another pipeline.
+# Prints CHANGED=true/false (also written to versions-commit.env for the dotenv report) so the
+# scheduled pipeline knows whether to stop here (a new pipeline is on its way) or to carry on
+# and rebuild the unchanged versions for the Debian security updates.
+#
+# Needs VERSIONS_PUSH_TOKEN (project access token, api + write_repository, allowed to push to
+# the protected default branch) — the CI job token cannot push.
 set -eu
 
-[ -f build.env ] || { echo "build.env missing — nothing to sync"; exit 0; }
+[ -f build.env ] || { echo "build.env missing — nothing to commit"; exit 1; }
+
+emit() { echo "CHANGED=$1" | tee versions-commit.env; }
 
 # shellcheck disable=SC1091
 . ./build.env
@@ -21,11 +28,16 @@ NEW_SUITE="$DEBIAN_SUITE"
 
 if [ "$NEW_PG" = "$PG_VERSION" ] && [ "$NEW_GIS" = "$POSTGIS_VERSION" ] &&
    [ "$NEW_TS" = "$TIMESCALEDB_VERSION" ] && [ "$NEW_PG_MAJOR" = "$PG_MAJOR" ]; then
-  echo "versions.env already matches what was published (PostgreSQL ${NEW_PG}, PostGIS ${NEW_GIS}, TimescaleDB ${NEW_TS}) — nothing to commit"
+  echo "versions.env already holds the newest upstream combination (PostgreSQL ${NEW_PG}, PostGIS ${NEW_GIS}, TimescaleDB ${NEW_TS}) — nothing to commit"
+  emit false
   exit 0
 fi
 
 echo "==> updating versions.env: PostgreSQL ${PG_VERSION} -> ${NEW_PG}, PostGIS ${POSTGIS_VERSION} -> ${NEW_GIS}, TimescaleDB ${TIMESCALEDB_VERSION} -> ${NEW_TS}"
+if [ -z "${VERSIONS_PUSH_TOKEN:-}" ]; then
+  echo "ERROR: VERSIONS_PUSH_TOKEN is not set — cannot push the version bump" >&2
+  exit 1
+fi
 
 set_var() { # set_var KEY VALUE FILE — replace the value of an existing KEY=... line
   sed -i "s|^$1=.*|$1=$2|" "$3"
@@ -72,17 +84,21 @@ awk -v maj="$NEW_PG_MAJOR" -v pg="$NEW_PG" -v gis="$NEW_GIS" -v ts="$NEW_TS" '
 
 if git diff --quiet -- versions.env README.md; then
   echo "no textual change after rewrite — nothing to commit"
+  emit false
   exit 0
 fi
 
 git config user.email "${GITLAB_USER_EMAIL:-ci@noreply.gitlab.com}"
 git config user.name "${GITLAB_USER_NAME:-GitLab CI}"
 git add versions.env README.md
-git commit -m "chore: PostgreSQL ${NEW_PG} + PostGIS ${NEW_GIS} + TimescaleDB ${NEW_TS}
+git commit -q -m "chore: PostgreSQL ${NEW_PG} + PostGIS ${NEW_GIS} + TimescaleDB ${NEW_TS}
 
-Published by pipeline ${CI_PIPELINE_ID:-local}."
+Resolved from upstream by scheduled pipeline ${CI_PIPELINE_ID:-local}; the pipeline of this
+commit builds, tests and publishes it."
 
-git push -o ci.skip \
+# No ci.skip on purpose: this push IS what triggers the build of the new versions.
+git push \
   "https://oauth2:${VERSIONS_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
   "HEAD:${CI_DEFAULT_BRANCH}"
-echo "==> pushed to ${CI_DEFAULT_BRANCH}"
+echo "==> pushed to ${CI_DEFAULT_BRANCH}; its pipeline will build and publish these versions"
+emit true

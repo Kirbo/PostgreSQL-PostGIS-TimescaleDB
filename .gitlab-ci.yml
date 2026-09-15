@@ -1,23 +1,40 @@
-# Build, smoke-test and publish the PostgreSQL + PostGIS + TimescaleDB image.
+# Build, test and publish the PostgreSQL + PostGIS + TimescaleDB image.
 #
 # WHERE IT RUNS: the "Kirbo Mini" Mac Mini runner (docker executor, tag `macos`), never a
 # metered SaaS runner — `default: tags: [macos]` puts every job there. The docker jobs talk to
 # the host's Docker Desktop daemon through the mounted socket (DOCKER_HOST below), the same
 # way the electrolux-to-mqtt pipeline does; there is no docker-in-docker service.
 #
-# WHAT MAKES IT SELF-UPDATING: the `resolve versions` job runs scripts/resolve-versions.sh,
-# which asks Docker Hub / PGDG / packagecloud what the newest PostgreSQL + PostGIS +
-# TimescaleDB combination they all ship for is, and hands it downstream as a dotenv artifact.
-# A weekly pipeline schedule therefore republishes the image whenever ANY of the three moves —
-# and also rebuilds an unchanged combination so the Debian base picks up security updates.
-# Nothing here has to be edited to follow upstream; to freeze it instead, set
-# RESOLVE_MODE=pinned in versions.env and edit the numbers there.
+# HOW A PUBLISH HAPPENS — one build, tested, then re-tagged:
+#   build    buildx builds every platform ONCE and pushes the result to this project's GitLab
+#            container registry as :ci-<pipeline> (staging). Its digest goes to staging.env.
+#   test     that staging digest is pulled and run: the smoke test on EVERY platform (amd64
+#            under emulation on the Apple Silicon runner), the upgrade tests (previous
+#            published images + every bundled older PostgreSQL major, both volume layouts),
+#            the compose file, and a vulnerability scan.
+#   publish  `imagetools create` re-tags the SAME digest onto the Docker Hub tags — nothing is
+#            rebuilt, so the bytes that were tested are the bytes users pull — and verifies
+#            every tag resolves to that digest with every platform present.
+#
+# HOW IT STAYS UP TO DATE — the weekly schedule commits, the commit builds:
+#   the scheduled pipeline resolves the newest PostgreSQL + PostGIS + TimescaleDB combination
+#   upstream ships (scripts/resolve-versions.sh). If that differs from versions.env, it commits
+#   the new numbers (versions.env + README) to the default branch and stops: the push pipeline
+#   of that commit builds, tests and publishes them, so every published image maps to a commit
+#   and `git log` is the upgrade history. If nothing changed, the schedule pipeline itself
+#   rebuilds and republishes the same versions so the Debian base picks up security updates.
+#   Every non-scheduled pipeline builds exactly what versions.env says.
+#
+# Requires: the project's container registry (staging; enable a cleanup policy for the
+# `ci-.*` tags), DOCKERHUB_USERNAME + DOCKERHUB_TOKEN, and VERSIONS_PUSH_TOKEN for the
+# commit-back (without it the schedule builds the resolved versions directly and warns).
 
 stages:
   - resolve
+  - lint
   - build
+  - test
   - publish
-  - sync
 
 workflow:
   auto_cancel:
@@ -36,6 +53,8 @@ variables:
   # somewhere else — nothing else in the repo hardcodes it.
   DOCKER_REGISTRY: docker.io
   DOCKERHUB_REPOSITORY: kirbownz/postgresql-postgis-timescaledb
+  # Staging: the project's own registry, one tag per pipeline (ci-<pipeline id>).
+  STAGING_IMAGE: $CI_REGISTRY_IMAGE
   # One buildx builder per job, torn down in after_script — a leaked buildkit container on the
   # Mac would otherwise keep its cache volume alive forever.
   DOCKER_BUILDER_NAME: "ppt-builder-${CI_JOB_ID}"
@@ -54,13 +73,23 @@ default:
   variables:
     DOCKER_HOST: "unix:///var/run/docker.sock"
   before_script:
-    - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
-    - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1
-      || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+    # gitlab-ci-token + CI_JOB_TOKEN on purpose: CI_REGISTRY_USER/PASSWORD are the predefined
+    # names, but the other KirboDev image repos reuse CI_REGISTRY_USERNAME/PASSWORD as Docker
+    # Hub aliases, and a custom variable would shadow the predefined one.
+    - echo "${CI_JOB_TOKEN}" | docker login -u gitlab-ci-token --password-stdin "${CI_REGISTRY}"
   after_script:
-    # after_script runs in a fresh shell: BUILDER_NAME from before_script is gone here, so use
-    # the pipeline-level variable directly or every job leaks a buildkit container.
+    - docker logout "${CI_REGISTRY}" || true
     - docker buildx rm "${DOCKER_BUILDER_NAME}" >/dev/null 2>&1 || true
+
+# The build must not run on a scheduled pipeline that has just committed a version bump: the
+# commit's own pipeline does the building. `BUILD_NEEDED` comes from the resolve stage.
+.needs_build:
+  before_script:
+    - |
+      if [ "${BUILD_NEEDED:-true}" != true ]; then
+        echo "versions.env was updated and pushed by this pipeline — the pipeline of that commit builds and publishes. Nothing to do here."
+        exit 0
+      fi
 
 # Publishing happens on the default branch, on schedules, and on a "Run pipeline" that sets
 # PUBLISH (any value) — never from a feature branch or MR, which only build and test.
@@ -73,57 +102,214 @@ default:
 
 # --- resolve -----------------------------------------------------------------------------
 
+# Every pipeline: build.env = the versions to build. Pinned to versions.env unless this is the
+# schedule (RESOLVE_MODE=auto in versions.env), in which case upstream is asked. When the
+# schedule finds something new and can push, it commits it and tells the rest of the pipeline
+# to stand down (BUILD_NEEDED=false).
 resolve versions:
   stage: resolve
   image: alpine:3
   before_script:
-    - apk add --no-cache curl
+    - apk add --no-cache curl git
   script:
+    - |
+      if [ "${CI_PIPELINE_SOURCE}" != "schedule" ]; then
+        export RESOLVE_MODE_OVERRIDE=pinned
+      fi
     - sh scripts/resolve-versions.sh build.env
+    - echo "BUILD_NEEDED=true" >> build.env
+    - |
+      if [ "${CI_PIPELINE_SOURCE}" = "schedule" ] && [ "$(sed -n 's/^RESOLVED_FROM=//p' build.env)" = auto ]; then
+        if [ -n "${VERSIONS_PUSH_TOKEN:-}" ]; then
+          sh scripts/commit-versions.sh
+          if [ "$(sed -n 's/^CHANGED=//p' versions-commit.env)" = true ]; then
+            sed -i 's/^BUILD_NEEDED=.*/BUILD_NEEDED=false/' build.env
+          fi
+        else
+          echo "WARNING: VERSIONS_PUSH_TOKEN is not set — building the resolved versions without committing them to versions.env" >&2
+        fi
+      fi
+    - cat build.env
   artifacts:
-    # dotenv: later jobs get PG_VERSION/POSTGIS_VERSION/... as environment variables.
-    # paths:  the same values as a file, because the scripts source ./build.env directly.
+    # dotenv: later jobs get PG_VERSION/POSTGIS_VERSION/BUILD_NEEDED/... as environment
+    # variables. paths: the same values as a file, because the scripts source ./build.env.
     reports:
       dotenv: build.env
     paths:
       - build.env
     expire_in: 1 week
 
-# --- build + test ------------------------------------------------------------------------
+# --- lint ----------------------------------------------------------------------------------
 
-# Builds for the runner's own architecture only (arm64 on the Mac) and actually RUNS the
-# result: versions asserted, a hypertable filled, a spatial index queried. A red job here
-# means nothing gets pushed — the publish job needs this one.
-build and test image:
-  extends: .docker
+shellcheck:
+  stage: lint
+  image: koalaman/shellcheck-alpine:stable
+  needs: []
+  script:
+    - shellcheck -S warning scripts/*.sh init-*.sh
+    - shellcheck -S warning -s bash docker-entrypoint-ppt.sh
+
+hadolint:
+  stage: lint
+  image: hadolint/hadolint:latest-alpine
+  needs: []
+  script:
+    - hadolint Dockerfile
+
+# The resolver is a pile of curl + sed over three upstream APIs; a format change upstream
+# would otherwise surface as a silent fallback to the pins. Pinned mode must reproduce
+# versions.env exactly, auto mode must find something at least as new.
+resolver:
+  stage: lint
+  image: alpine:3
+  needs: []
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - RESOLVE_MODE_OVERRIDE=pinned sh scripts/resolve-versions.sh pinned.env
+    - . ./versions.env
+    - |
+      for k in PG_MAJOR PG_VERSION POSTGIS_VERSION TIMESCALEDB_VERSION DEBIAN_SUITE PLATFORMS; do
+        eval want="\$$k"
+        got="$(sed -n "s/^$k=//p" pinned.env)"
+        [ "$got" = "$want" ] || { echo "FAIL: pinned $k = '$got', versions.env says '$want'" >&2; exit 1; }
+      done
+      echo "ok: pinned mode reproduces versions.env"
+    - RESOLVE_MODE_OVERRIDE=auto sh scripts/resolve-versions.sh auto.env
+    - |
+      [ "$(sed -n 's/^RESOLVED_FROM=//p' auto.env)" = auto ] || { echo "FAIL: auto mode fell back to the pins — an upstream lookup is broken" >&2; exit 1; }
+      newest="$(printf '%s\n%s\n' "$PG_VERSION" "$(sed -n 's/^PG_VERSION=//p' auto.env)" | sort -t. -k1,1n -k2,2n | tail -n 1)"
+      [ "$newest" = "$(sed -n 's/^PG_VERSION=//p' auto.env)" ] || { echo "FAIL: auto mode found PostgreSQL $(sed -n 's/^PG_VERSION=//p' auto.env), older than the pinned $PG_VERSION" >&2; exit 1; }
+      echo "ok: auto mode resolves to $(sed -n 's/^PG_VERSION=//p' auto.env) / $(sed -n 's/^POSTGIS_VERSION=//p' auto.env) / $(sed -n 's/^TIMESCALEDB_VERSION=//p' auto.env)"
+
+# --- build -------------------------------------------------------------------------------
+
+# One multi-arch build, pushed to the staging registry. Everything downstream tests and
+# publishes this exact digest.
+build image:
+  extends:
+    - .docker
+    - .needs_build
   stage: build
   needs:
     - job: resolve versions
       artifacts: true
-  variables:
-    LOCAL_TAG: "postgresql-postgis-timescaledb:ci-${CI_PIPELINE_ID}"
+  before_script:
+    - !reference [.needs_build, before_script]
+    - !reference [.docker, before_script]
+    - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
+    - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1
+      || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
   script:
-    - sh scripts/docker-buildx-release.sh test
-    - sh scripts/smoke-test.sh "${LOCAL_TAG}"
+    - sh scripts/docker-buildx-release.sh build
+  artifacts:
+    reports:
+      dotenv: staging.env
+    paths:
+      - staging.env
+      - staging-metadata.json
+    expire_in: 1 week
+
+# --- test --------------------------------------------------------------------------------
+
+.test:
+  extends:
+    - .docker
+    - .needs_build
+  stage: test
+  needs:
+    - job: resolve versions
+      artifacts: true
+    - job: build image
+      artifacts: true
+  before_script:
+    - !reference [.needs_build, before_script]
+    - !reference [.docker, before_script]
   after_script:
-    - docker rmi "postgresql-postgis-timescaledb:ci-${CI_PIPELINE_ID}" >/dev/null 2>&1 || true
-    - docker buildx rm "${DOCKER_BUILDER_NAME}" >/dev/null 2>&1 || true
+    - docker logout "${CI_REGISTRY}" || true
+
+# Starts the image, asserts the versions, fills a hypertable, queries a spatial index, replays
+# the Home Assistant LTSS DDL, checks the healthcheck and the defaults — per platform.
+smoke test:
+  extends: .test
+  parallel:
+    matrix:
+      - PLATFORM: [linux/amd64, linux/arm64]
+  script:
+    - docker pull --platform "${PLATFORM}" "${STAGING_REF}"
+    - PLATFORM="${PLATFORM}" sh scripts/smoke-test.sh "${STAGING_REF}"
+  after_script:
+    - docker rmi "${STAGING_REF}" >/dev/null 2>&1 || true
+    - docker logout "${CI_REGISTRY}" || true
+
+# Existing installs must survive the new image: the previously published :latest, the oldest
+# published tag of the same major, and a real PostgreSQL <major> data directory for every
+# older major the image can upgrade from — in both volume layouts. Runner architecture only.
+upgrade test:
+  extends: .test
+  timeout: 2h
+  script:
+    - docker pull "${STAGING_REF}"
+    - apk add --no-cache curl
+    - sh scripts/upgrade-test.sh "${STAGING_REF}"
+  after_script:
+    - docker rmi "${STAGING_REF}" >/dev/null 2>&1 || true
+    - docker logout "${CI_REGISTRY}" || true
+
+compose test:
+  extends: .test
+  script:
+    - docker pull "${STAGING_REF}"
+    - sh scripts/compose-test.sh "${STAGING_REF}"
+
+# Debian base + apt packages, rebuilt weekly: a CVE scan is cheap here. Informational — the
+# image ships regardless, the job just goes red in the pipeline view.
+vulnerability scan:
+  extends: .needs_build
+  stage: test
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  needs:
+    - job: resolve versions
+      artifacts: true
+    - job: build image
+      artifacts: true
+  allow_failure: true
+  variables:
+    TRIVY_USERNAME: gitlab-ci-token
+    TRIVY_PASSWORD: $CI_JOB_TOKEN
+    TRIVY_NO_PROGRESS: "true"
+  script:
+    - trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "${STAGING_REF}"
 
 # --- publish -----------------------------------------------------------------------------
 
+# Re-tags the tested staging digest onto Docker Hub. No build, no `docker push` of layers from
+# the runner: imagetools copies the manifest list (with its provenance/SBOM attestations)
+# registry-to-registry, then the script verifies what Docker Hub serves.
 publish image:
   extends:
     - .docker
+    - .needs_build
     - .publish_rules
   stage: publish
-  # Pushing the release image must not be auto-cancelled halfway by a new commit.
+  # Publishing must not be auto-cancelled halfway by a new commit.
   interruptible: false
   needs:
     - job: resolve versions
       artifacts: true
-    - job: build and test image
+    - job: build image
+      artifacts: true
+    - job: smoke test
+      artifacts: false
+    - job: upgrade test
+      artifacts: false
+    - job: compose test
       artifacts: false
   before_script:
+    - !reference [.needs_build, before_script]
+    - !reference [.docker, before_script]
     # Credentials: DOCKERHUB_USERNAME/DOCKERHUB_TOKEN, or the CI_REGISTRY_USERNAME/
     # CI_REGISTRY_PASSWORD names used by the other KirboDev image repos — whichever is set.
     - export DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-${CI_REGISTRY_USERNAME:-}}"
@@ -133,37 +319,9 @@ publish image:
         echo "ERROR: set DOCKERHUB_USERNAME + DOCKERHUB_TOKEN (masked) in Settings -> CI/CD -> Variables" >&2
         exit 1
       fi
-    - export BUILDER_NAME="${DOCKER_BUILDER_NAME}"
-    - docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1
-      || docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
     - echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin "${DOCKER_REGISTRY}"
   script:
     - sh scripts/docker-buildx-release.sh publish
   after_script:
     - docker logout "${DOCKER_REGISTRY}" || true
-    - docker buildx rm "${DOCKER_BUILDER_NAME}" >/dev/null 2>&1 || true
-
-# --- sync ---------------------------------------------------------------------------------
-
-# Optional bookkeeping: write the versions that were just published back into versions.env and
-# README.md, so the repo states what :latest actually contains and `git log` becomes the
-# upgrade history. Runs only when a project access token (api + write_repository, Maintainer,
-# allowed to push to the protected default branch) is stored as VERSIONS_PUSH_TOKEN; without
-# that variable the job simply does not exist and everything else still works.
-# The push carries -o ci.skip so this commit does not start another pipeline.
-sync versions.env:
-  stage: sync
-  image: alpine:3
-  interruptible: false
-  needs:
-    - job: resolve versions
-      artifacts: true
-    - job: publish image
-      artifacts: false
-  rules:
-    - if: "$VERSIONS_PUSH_TOKEN && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
-    - when: never
-  before_script:
-    - apk add --no-cache git
-  script:
-    - sh scripts/sync-versions.sh
+    - docker logout "${CI_REGISTRY}" || true

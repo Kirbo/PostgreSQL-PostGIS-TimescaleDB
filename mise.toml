@@ -1,0 +1,4 @@
+# Local lint toolchain, pinned. CI runs the same tools from their official images.
+[tools]
+shellcheck = "0.11.0"
+hadolint = "2.15.1"

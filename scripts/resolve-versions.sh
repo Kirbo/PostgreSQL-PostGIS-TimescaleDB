@@ -17,7 +17,11 @@
 set -eu
 
 OUT="${1:-build.env}"
+# shellcheck disable=SC1091
 . ./versions.env
+# The environment wins over the file: CI forces "pinned" for every pipeline that is not the
+# weekly schedule, so a push builds exactly what the commit says.
+RESOLVE_MODE="${RESOLVE_MODE_OVERRIDE:-${RESOLVE_MODE}}"
 
 emit() {
   cat > "$OUT" <<EMIT
@@ -75,7 +79,7 @@ common_max_version() { # common_max_version <index-prefix> <package>
 # Newest STABLE postgres:<major>.<minor>-<suite> tag on Docker Hub, as "<major>.<minor>".
 latest_pg_patch() { # latest_pg_patch <major>
   fetch "https://hub.docker.com/v2/repositories/library/postgres/tags?page_size=100&name=$1." 2>/dev/null \
-    | tr ',{' '\n\n' \
+    | tr ',{' '\n' \
     | sed -n "s/.*\"name\": *\"\([0-9][0-9.]*\)-${DEBIAN_SUITE}\".*/\1/p" \
     | grep "^$1\." \
     | sort -t. -k1,1n -k2,2n | tail -n 1

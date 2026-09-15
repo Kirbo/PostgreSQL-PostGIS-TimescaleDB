@@ -10,7 +10,8 @@ volumes:
 
 services:
   postgres:
-    image: kirbownz/postgresql-postgis-timescaledb:latest
+    # PPT_IMAGE lets the pipeline point this file at the freshly built image.
+    image: ${PPT_IMAGE:-kirbownz/postgresql-postgis-timescaledb:latest}
     container_name: postgres
     restart: unless-stopped
     environment:
@@ -26,13 +27,8 @@ services:
       # declares the VOLUME one level up, so the mount point is /var/lib/postgresql — NOT
       # /var/lib/postgresql/data as it was for PostgreSQL <= 17.
       - pg_data:/var/lib/postgresql
-    healthcheck:
-      # The image ships its own pg_isready healthcheck; this only shortens the start period.
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+    # The image ships its own healthcheck (pg_isready over TCP, 5 min start period so an
+    # automatic major upgrade of a large database on first start is not reported as unhealthy).
 
 #  pgadmin:
 #    image: dpage/pgadmin4:latest

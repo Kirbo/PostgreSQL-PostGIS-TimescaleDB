@@ -1,68 +1,109 @@
 #!/bin/sh
-# docker-buildx-release.sh test|publish — the single buildx invocation used by CI.
+# docker-buildx-release.sh local|build|publish — the buildx / registry side of the pipeline.
 #
-#   test     single-arch (the runner's own arch), --load into the local docker so
-#            scripts/smoke-test.sh can actually run the image. Never pushed.
-#   publish  every arch in PLATFORMS, --push, with the full tag set.
+#   local    single-arch (this machine's), --load into the local docker: what a laptop and
+#            `make`-style usage want. Tag: LOCAL_TAG.
+#   build    every arch in PLATFORMS, pushed ONCE to the staging registry (STAGING_IMAGE, the
+#            project's GitLab container registry in CI) as :ci-<pipeline>, with provenance +
+#            SBOM attestations. Writes the manifest-list digest to staging.env
+#            (STAGING_REF=<image>@sha256:...), which is what gets tested and, unchanged, what
+#            gets published — the bits that were tested are the bits that ship.
+#   publish  re-tags STAGING_REF onto the Docker Hub tags (no rebuild: `imagetools create`
+#            copies the manifest list + blobs), then verifies every tag resolves to the same
+#            digest and carries every platform.
 #
-# Tags pushed by `publish`:
+# Tags published:
 #   :<PG_VERSION>-postgis<X>-timescaledb<Y>                  the fully-qualified combo
 #   :<PG_VERSION>                                            e.g. 18.6
 #   :<PG_MAJOR>                                              e.g. 18 — track a major
 #   :latest                                                  moving, newest build
 #
-# They are listed (and passed to buildx) in that order ON PURPOSE. One build produces one
-# manifest-list digest and all four tags point at it, but buildx pushes the manifests in -t
-# order, a couple of seconds apart. Docker Hub's tag page sorts by last-pushed, so pushing
-# :latest LAST puts it at the top of
+# They are pushed in that order ON PURPOSE. Docker Hub's tag page sorts by last-pushed, so
+# pushing :latest LAST puts it at the top of
 # https://hub.docker.com/r/kirbownz/postgresql-postgis-timescaledb/tags — and the rest fall in
 # most-specific-last order beneath it.
 #
-# Inputs (env): DOCKER_REGISTRY, DOCKERHUB_REPOSITORY, BUILDER_NAME, LOCAL_TAG,
-#   CI_COMMIT_SHORT_SHA; versions from build.env (resolve-versions.sh) or versions.env.
+# Inputs (env): DOCKER_REGISTRY, DOCKERHUB_REPOSITORY, STAGING_IMAGE, BUILDER_NAME, LOCAL_TAG,
+#   CI_COMMIT_SHORT_SHA, CI_PIPELINE_ID; versions from build.env (resolve-versions.sh) or
+#   versions.env.
 set -eu
 
-MODE="${1:?usage: docker-buildx-release.sh test|publish}"
+MODE="${1:?usage: docker-buildx-release.sh local|build|publish}"
 
+# shellcheck disable=SC1091
 if [ -f build.env ]; then . ./build.env; else . ./versions.env; fi
 
 REGISTRY="${DOCKER_REGISTRY:-docker.io}"
 REPOSITORY="${DOCKERHUB_REPOSITORY:?DOCKERHUB_REPOSITORY is not set}"
 IMAGE="${REGISTRY}/${REPOSITORY}"
 COMBO="${PG_VERSION}-postgis${POSTGIS_VERSION}-timescaledb${TIMESCALEDB_VERSION}"
+STAGING_TAG="${STAGING_IMAGE:-}:ci-${CI_PIPELINE_ID:-local}"
+
+build() { # build [buildx args...]
+  echo "==> ${MODE}: PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION} (${DEBIAN_SUITE})"
+  docker buildx build \
+    ${BUILDER_NAME:+--builder "${BUILDER_NAME}"} \
+    --build-arg PG_VERSION="${PG_VERSION}" \
+    --build-arg DEBIAN_SUITE="${DEBIAN_SUITE}" \
+    --build-arg POSTGIS_VERSION="${POSTGIS_VERSION}" \
+    --build-arg TIMESCALEDB_VERSION="${TIMESCALEDB_VERSION}" \
+    --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+    --build-arg VCS_REF="${CI_COMMIT_SHORT_SHA:-local}" \
+    "$@" \
+    -f Dockerfile .
+}
 
 case "$MODE" in
-  test)
-    PLATFORM_ARGS="--load"
-    OUTPUT_ARGS=""
-    TAGS="-t ${LOCAL_TAG:-postgresql-postgis-timescaledb:ci-test}"
+  local)
+    build --load -t "${LOCAL_TAG:-postgresql-postgis-timescaledb:local}"
     ;;
-  publish)
-    PLATFORM_ARGS="--platform ${PLATFORMS}"
+
+  build)
+    [ -n "${STAGING_IMAGE:-}" ] || { echo "ERROR: STAGING_IMAGE is not set" >&2; exit 1; }
     # provenance + sbom: the pushed manifest records how and from what it was built.
-    OUTPUT_ARGS="--push --provenance=true --sbom=true"
-    TAGS="-t ${IMAGE}:${COMBO} -t ${IMAGE}:${PG_VERSION} -t ${IMAGE}:${PG_MAJOR} -t ${IMAGE}:latest"
+    build --platform "${PLATFORMS}" --push --provenance=true --sbom=true \
+      --metadata-file staging-metadata.json -t "${STAGING_TAG}"
+    DIGEST="$(sed -n 's/.*"containerimage.digest": *"\([^"]*\)".*/\1/p' staging-metadata.json | head -n 1)"
+    [ -n "$DIGEST" ] || { echo "ERROR: no digest in staging-metadata.json" >&2; cat staging-metadata.json; exit 1; }
+    {
+      echo "STAGING_TAG=${STAGING_TAG}"
+      echo "STAGING_REF=${STAGING_IMAGE}@${DIGEST}"
+      echo "STAGING_DIGEST=${DIGEST}"
+    } > staging.env
+    echo "==> pushed ${STAGING_TAG} = ${DIGEST}"
+    docker buildx imagetools inspect "${STAGING_TAG}"
     ;;
+
+  publish)
+    # shellcheck disable=SC1091
+    [ -f staging.env ] && . ./staging.env
+    [ -n "${STAGING_REF:-}" ] || { echo "ERROR: STAGING_REF is not set (no staging.env from the build job?)" >&2; exit 1; }
+    echo "==> publishing ${STAGING_REF} as ${IMAGE}:{${COMBO},${PG_VERSION},${PG_MAJOR},latest}"
+    for tag in "${COMBO}" "${PG_VERSION}" "${PG_MAJOR}" latest; do
+      docker buildx imagetools create -t "${IMAGE}:${tag}" "${STAGING_REF}"
+    done
+
+    echo "==> verifying what Docker Hub now serves"
+    want="${STAGING_DIGEST:-${STAGING_REF##*@}}"
+    for tag in "${COMBO}" "${PG_VERSION}" "${PG_MAJOR}" latest; do
+      got="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:${tag}")"
+      if [ "$got" != "$want" ]; then
+        echo "ERROR: ${IMAGE}:${tag} is ${got}, expected ${want}" >&2
+        exit 1
+      fi
+      echo "ok: ${IMAGE}:${tag} = ${got}"
+    done
+    platforms="$(docker buildx imagetools inspect --format '{{range .Manifest.Manifests}}{{if ne .Platform.OS "unknown"}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}{{end}}' "${IMAGE}:latest")"
+    for p in $(echo "${PLATFORMS}" | tr ',' ' '); do
+      case " ${platforms} " in
+        *" ${p} "*) echo "ok: ${IMAGE}:latest has ${p}" ;;
+        *) echo "ERROR: ${IMAGE}:latest lacks ${p} (has: ${platforms})" >&2; exit 1 ;;
+      esac
+    done
+    ;;
+
   *)
-    echo "ERROR: unknown mode '${MODE}' (expected test|publish)" >&2
+    echo "ERROR: unknown mode '${MODE}' (expected local|build|publish)" >&2
     exit 1
     ;;
 esac
-
-echo "==> ${MODE}: PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION} (${DEBIAN_SUITE})"
-
-# ${PLATFORM_ARGS} / ${OUTPUT_ARGS} / ${TAGS} are deliberately unquoted — each is a list of
-# flags, and some are empty depending on the mode.
-# shellcheck disable=SC2086
-docker buildx build \
-  ${BUILDER_NAME:+--builder "${BUILDER_NAME}"} \
-  --build-arg PG_VERSION="${PG_VERSION}" \
-  --build-arg DEBIAN_SUITE="${DEBIAN_SUITE}" \
-  --build-arg POSTGIS_VERSION="${POSTGIS_VERSION}" \
-  --build-arg TIMESCALEDB_VERSION="${TIMESCALEDB_VERSION}" \
-  --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-  --build-arg VCS_REF="${CI_COMMIT_SHORT_SHA:-local}" \
-  ${PLATFORM_ARGS} \
-  ${OUTPUT_ARGS} \
-  ${TAGS} \
-  -f Dockerfile .

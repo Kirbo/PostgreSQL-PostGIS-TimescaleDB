@@ -1,6 +1,8 @@
-# Allowlist: the build context only needs the init scripts. Everything else (git history,
-# CI config, scripts/) would just invalidate the build cache.
+# Allowlist: the build context only needs the init scripts and the entrypoint. Everything else
+# (git history, CI config, scripts/) would just invalidate the build cache.
 *
 !init-postgis.sh
 !init-timescaledb.sh
 !init-postgres.sh
+!init-stamp.sh
+!docker-entrypoint-ppt.sh

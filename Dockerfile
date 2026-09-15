@@ -22,7 +22,13 @@ FROM postgres:${PG_VERSION}-${DEBIAN_SUITE}
 # base image is the authority on which major it contains.
 ARG DEBIAN_SUITE=trixie
 ARG POSTGIS_VERSION=3.6.4
-ARG TIMESCALEDB_VERSION=2.29.2
+ARG TIMESCALEDB_VERSION=2.30.0
+# Oldest PostgreSQL major whose server binaries (plus PostGIS + TimescaleDB at the versions
+# above) are bundled so that a data directory of that major is pg_upgrade'd automatically on
+# start. Majors for which upstream has no TimescaleDB package at TIMESCALEDB_VERSION are
+# skipped (Timescale requires the same extension version on both sides of pg_upgrade), which
+# is what bounds the list in practice. Set to PG_MAJOR to bundle nothing.
+ARG MIN_UPGRADE_FROM_MAJOR=15
 ARG BUILD_DATE
 ARG VCS_REF
 
@@ -36,6 +42,8 @@ LABEL org.opencontainers.image.title="PostgreSQL + PostGIS + TimescaleDB" \
 ENV POSTGIS_VERSION=${POSTGIS_VERSION} \
     TIMESCALEDB_VERSION=${TIMESCALEDB_VERSION}
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# hadolint ignore=DL3008
 RUN <<'EOF'
 set -eux
 
@@ -68,23 +76,54 @@ require() {
   [ -n "$2" ] || { echo "ERROR: no package '$1' matching the requested version in the apt repos" >&2; exit 1; }
 }
 
-POSTGIS_PKG="$(resolve_pkg "postgresql-${PG_MAJOR}-postgis-3" "${POSTGIS_VERSION}")"
-POSTGIS_SCRIPTS_PKG="$(resolve_pkg "postgresql-${PG_MAJOR}-postgis-3-scripts" "${POSTGIS_VERSION}")"
-TIMESCALEDB_PKG="$(resolve_pkg "timescaledb-2-postgresql-${PG_MAJOR}" "${TIMESCALEDB_VERSION}")"
-TIMESCALEDB_LOADER_PKG="$(resolve_pkg "timescaledb-2-loader-postgresql-${PG_MAJOR}" "${TIMESCALEDB_VERSION}")"
+# Install the extensions for the image's own major, then server + extensions for every older
+# major that the auto-upgrade can start from. The current major is mandatory; an older major
+# is bundled only when BOTH extensions exist for it at exactly these versions.
+UPGRADE_FROM=""
+major="${MIN_UPGRADE_FROM_MAJOR}"
+while [ "$major" -le "$PG_MAJOR" ]; do
+  POSTGIS_PKG="$(resolve_pkg "postgresql-${major}-postgis-3" "${POSTGIS_VERSION}")"
+  POSTGIS_SCRIPTS_PKG="$(resolve_pkg "postgresql-${major}-postgis-3-scripts" "${POSTGIS_VERSION}")"
+  TIMESCALEDB_PKG="$(resolve_pkg "timescaledb-2-postgresql-${major}" "${TIMESCALEDB_VERSION}")"
+  TIMESCALEDB_LOADER_PKG="$(resolve_pkg "timescaledb-2-loader-postgresql-${major}" "${TIMESCALEDB_VERSION}")"
 
-require "postgresql-${PG_MAJOR}-postgis-3 ${POSTGIS_VERSION}" "${POSTGIS_PKG}"
-require "postgresql-${PG_MAJOR}-postgis-3-scripts ${POSTGIS_VERSION}" "${POSTGIS_SCRIPTS_PKG}"
-require "timescaledb-2-postgresql-${PG_MAJOR} ${TIMESCALEDB_VERSION}" "${TIMESCALEDB_PKG}"
-require "timescaledb-2-loader-postgresql-${PG_MAJOR} ${TIMESCALEDB_VERSION}" "${TIMESCALEDB_LOADER_PKG}"
+  if [ "$major" = "$PG_MAJOR" ]; then
+    require "postgresql-${major}-postgis-3 ${POSTGIS_VERSION}" "${POSTGIS_PKG}"
+    require "postgresql-${major}-postgis-3-scripts ${POSTGIS_VERSION}" "${POSTGIS_SCRIPTS_PKG}"
+    require "timescaledb-2-postgresql-${major} ${TIMESCALEDB_VERSION}" "${TIMESCALEDB_PKG}"
+    require "timescaledb-2-loader-postgresql-${major} ${TIMESCALEDB_VERSION}" "${TIMESCALEDB_LOADER_PKG}"
+    SERVER_PKGS=""
+  elif [ -z "${POSTGIS_PKG}" ] || [ -z "${POSTGIS_SCRIPTS_PKG}" ] || [ -z "${TIMESCALEDB_PKG}" ] || [ -z "${TIMESCALEDB_LOADER_PKG}" ]; then
+    echo "upgrade-from PostgreSQL ${major}: skipped (postgis=${POSTGIS_PKG:-none} timescaledb=${TIMESCALEDB_PKG:-none})"
+    major=$((major + 1))
+    continue
+  else
+    SERVER_PKGS="postgresql-${major}"
+    UPGRADE_FROM="${UPGRADE_FROM:+${UPGRADE_FROM} }${major}"
+  fi
 
-echo "resolved: postgis=${POSTGIS_PKG} postgis-scripts=${POSTGIS_SCRIPTS_PKG} timescaledb=${TIMESCALEDB_PKG} loader=${TIMESCALEDB_LOADER_PKG}"
+  echo "resolved for PostgreSQL ${major}: postgis=${POSTGIS_PKG} postgis-scripts=${POSTGIS_SCRIPTS_PKG} timescaledb=${TIMESCALEDB_PKG} loader=${TIMESCALEDB_LOADER_PKG}"
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends ${SERVER_PKGS} \
+    "postgresql-${major}-postgis-3=${POSTGIS_PKG}" \
+    "postgresql-${major}-postgis-3-scripts=${POSTGIS_SCRIPTS_PKG}" \
+    "timescaledb-2-loader-postgresql-${major}=${TIMESCALEDB_LOADER_PKG}" \
+    "timescaledb-2-postgresql-${major}=${TIMESCALEDB_PKG}"
+  major=$((major + 1))
+done
+# Read by docker-entrypoint-ppt.sh to decide whether a data directory can be upgraded.
+echo "PPT_UPGRADE_FROM_MAJORS=\"${UPGRADE_FROM}\"" > /etc/ppt-upgrade-from.env
+echo "bundled upgrade sources: PostgreSQL ${UPGRADE_FROM:-<none>}"
 
-apt-get install -y --no-install-recommends \
-  "postgresql-${PG_MAJOR}-postgis-3=${POSTGIS_PKG}" \
-  "postgresql-${PG_MAJOR}-postgis-3-scripts=${POSTGIS_SCRIPTS_PKG}" \
-  "timescaledb-2-loader-postgresql-${PG_MAJOR}=${TIMESCALEDB_LOADER_PKG}" \
-  "timescaledb-2-postgresql-${PG_MAJOR}=${TIMESCALEDB_PKG}"
+# The bundled old majors exist only to run pg_upgrade. Their extensions are brought to
+# TIMESCALEDB_VERSION before that happens, so the ~350 MB of previous TimescaleDB shared
+# libraries each package carries (for in-place updates FROM those versions) are dead weight
+# there, as is the LLVM JIT bitcode. The image's own major keeps everything.
+for major in ${UPGRADE_FROM}; do
+  find "/usr/lib/postgresql/${major}/lib" -name 'timescaledb-*.so' \
+    ! -name "timescaledb-${TIMESCALEDB_VERSION}.so" ! -name "timescaledb-tsl-${TIMESCALEDB_VERSION}.so" -delete
+  rm -rf "/usr/lib/postgresql/${major}/lib/bitcode" "/usr/share/postgresql/${major}/man"
+done
 
 # TimescaleDB is a loadable module: without it in shared_preload_libraries, CREATE EXTENSION
 # timescaledb fails. The base image copies this sample into $PGDATA at initdb time, so patching
@@ -99,11 +138,21 @@ rm -rf /var/lib/apt/lists/*
 EOF
 
 # Order matters: PostGIS and TimescaleDB extensions are created before the summary that prints
-# what ended up installed.
+# what ended up installed, and the stamp that marks the directory as matching this image last.
 COPY ./init-postgis.sh /docker-entrypoint-initdb.d/1.postgis.sh
 COPY ./init-timescaledb.sh /docker-entrypoint-initdb.d/2.timescaledb.sh
 COPY ./init-postgres.sh /docker-entrypoint-initdb.d/3.postgres.sh
+COPY ./init-stamp.sh /docker-entrypoint-initdb.d/9.ppt-stamp.sh
+
+# Existing data directories are brought up to date (extension updates, pg_upgrade from an
+# older bundled major) before the official entrypoint starts the server. See the script.
+COPY --chmod=755 ./docker-entrypoint-ppt.sh /usr/local/bin/docker-entrypoint-ppt.sh
+ENTRYPOINT ["docker-entrypoint-ppt.sh"]
+CMD ["postgres"]
 
 # The base image ships no healthcheck; docker-compose depends_on: service_healthy needs one.
-HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \
-  CMD pg_isready -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}" || exit 1
+# TCP on purpose: the entrypoint's temporary init/upgrade server listens on the socket only,
+# so a socket check would report healthy while the extensions are still being set up.
+# hadolint ignore=DL3025
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5m --retries=5 \
+  CMD pg_isready -h localhost -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}" || exit 1

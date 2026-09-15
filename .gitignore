@@ -1,2 +1,8 @@
 .idea/
 build.env
+staging.env
+staging-metadata.json
+versions-commit.env
+pinned.env
+auto.env
+compose-*.override.yml

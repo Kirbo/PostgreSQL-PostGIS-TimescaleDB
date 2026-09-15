@@ -11,7 +11,7 @@ built for `linux/amd64` and `linux/arm64`.
 
 * **PostgreSQL 18.6** — [release notes](https://www.postgresql.org/docs/release/)
 * **PostGIS 3.6.4** — [release notes](https://github.com/postgis/postgis/releases/tag/3.6.4)
-* **TimescaleDB 2.29.2** — [release notes](https://github.com/timescale/timescaledb/releases/tag/2.29.2)
+* **TimescaleDB 2.30.0** — [release notes](https://github.com/timescale/timescaledb/releases/tag/2.30.0)
 
 <!-- versions:end -->
 
@@ -30,7 +30,7 @@ install rather than a source compile, on both architectures.
 | `latest` | the newest build |
 | `18` | newest build of that PostgreSQL major |
 | `18.6` | newest build of that PostgreSQL version |
-| `18.6-postgis3.6.4-timescaledb2.29.2` | that exact version combination |
+| `18.6-postgis3.6.4-timescaledb2.30.0` | that exact version combination |
 
 <!-- tags:end -->
 
@@ -87,20 +87,63 @@ replayed and asserted on every build. All of it still works on PostgreSQL 18 / T
 2.29 — the only complaint is TimescaleDB's cosmetic "use TEXT instead of VARCHAR" hint, which
 comes from LTSS's own schema.
 
-### Upgrading from an image based on PostgreSQL ≤ 17
+### Upgrades are automatic
 
-Two breaking changes, both from upstream:
+The image brings an existing data directory up to date **by itself, on start**, before the
+server is opened to clients — the weekly auto-update therefore never leaves a volume behind:
 
-1. **The data directory moved.** PostgreSQL 18's official image uses
-   `PGDATA=/var/lib/postgresql/18/docker` and declares the volume at `/var/lib/postgresql`.
-   Mount `/var/lib/postgresql`, not `/var/lib/postgresql/data`.
-2. **A major-version jump needs a dump/restore** (or `pg_upgrade`). An old data directory will
-   not start under a newer major. Dump with the OLD image, restore into the new one.
+* **PostGIS / TimescaleDB moved** (same PostgreSQL major): `ALTER EXTENSION … UPDATE` is run in
+  every database that is behind, TimescaleDB first and in a fresh session as Timescale
+  requires. A data directory that already matches the image is recognised from a stamp file,
+  so a normal restart costs nothing.
+* **PostgreSQL moved to a new major**: the image bundles the server binaries (plus PostGIS and
+  TimescaleDB at the same versions) of the previous majors that TimescaleDB still supports —
+  the ones that have a TimescaleDB package at the built version, 16 and 17 at the time of
+  writing (`docker run --rm <image> cat /etc/ppt-upgrade-from.env` tells) — and runs
+  `pg_upgrade --link` (seconds, no second copy of the data). Before that, the extensions are
+  updated on the old cluster so both sides run identical versions (Timescale's requirement),
+  the new cluster is initialised with the old one's encoding, locale provider, checksum setting
+  and WAL segment size, `pg_hba.conf`, `pg_ident.conf`, `postgresql.auto.conf` (`ALTER SYSTEM`)
+  and `conf.d/` are carried over, every setting explicitly enabled in the old
+  `postgresql.conf` is appended to the new one (settings the new major no longer knows are
+  kept as comments; the old file stays next to it as `postgresql.conf.pg<major>`), and
+  `vacuumdb --analyze-in-stages` runs before the server opens. An interrupted upgrade is
+  resumed on the next start; a failed `pg_upgrade` leaves the old cluster untouched and
+  startable with the old image.
+* **The data directory moved** (PostgreSQL ≤ 17 images kept it at
+  `/var/lib/postgresql/data`, 18+ at `/var/lib/postgresql/<major>/docker` inside a volume at
+  `/var/lib/postgresql`): both are found. A volume still mounted at
+  `/var/lib/postgresql/data` is upgraded in place and keeps being used from there; a data
+  directory inside a `/var/lib/postgresql` volume is upgraded into the 18+ location.
+* **Downgrades** (a `:17` tag on an 18 directory) are refused with a clear message; a newer
+  extension version than the image ships is left alone with a warning.
+
+Knobs, all environment variables:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PPT_AUTO_UPGRADE` | `on` | `off` = behave exactly like the official image (no extension updates, no `pg_upgrade`) |
+| `PPT_UPGRADE_MODE` | `link` | `copy` = `pg_upgrade` without `--link` (twice the disk, but the old cluster stays startable with the old image) |
+| `PPT_KEEP_OLD_CLUSTER` | `0` | `1` = keep the old cluster directory after a successful major upgrade instead of deleting it |
+
+Take a backup before a major upgrade anyway — `pg_upgrade --link` is a one-way street once the
+new cluster has started. What the image cannot do is upgrade from a major TimescaleDB has
+dropped (there is no TimescaleDB *n* package for it, so the two sides could never match): such
+a directory makes the container stop with a message naming the last image tag that can still
+upgrade it.
+
+All of this is tested on every build: the previously published image and the oldest published
+tag of the same major are started on a volume, seeded (hypertables with compressed chunks and
+geometries, a second database, `ALTER SYSTEM` and `postgresql.conf` settings, a custom
+superuser), and taken over by the new image — after a clean stop, after `docker kill`, and as
+an unprivileged `--user`. Then a real PostgreSQL 16 and 17 data directory (built from this
+Dockerfile on the older base image) is upgraded in both volume layouts, an interrupted upgrade
+is resumed, and `PPT_AUTO_UPGRADE=off` is checked to refuse like the official image does.
 
 ## Building it yourself
 
 ```bash
-docker build -t postgresql-postgis-timescaledb .            # versions default to versions.env's
+docker build -t postgresql-postgis-timescaledb .            # versions default to the Dockerfile's ARGs
 sh scripts/smoke-test.sh postgresql-postgis-timescaledb     # start it and assert it works
 ```
 
@@ -110,58 +153,81 @@ Every version is a build arg, so any combination the apt repos still carry can b
 docker build -t pg17 \
   --build-arg PG_VERSION=17.11 \
   --build-arg POSTGIS_VERSION=3.6.4 \
-  --build-arg TIMESCALEDB_VERSION=2.29.2 .
+  --build-arg TIMESCALEDB_VERSION=2.30.0 .
 ```
 
 A version that is not in the repositories fails the build loudly rather than silently
-installing something else.
+installing something else. `MIN_UPGRADE_FROM_MAJOR` (default 15) is the oldest PostgreSQL
+major whose binaries are bundled for the automatic `pg_upgrade`; majors without a TimescaleDB
+package at the built version are skipped, so the list follows Timescale's support window.
 
 ## Staying up to date
 
-`versions.env` is the only file with version numbers in it, and it has two modes:
+`versions.env` is the only file with version numbers in it, and **every published image
+corresponds to a commit of it**:
 
-* **`RESOLVE_MODE=auto`** (default) — CI runs `scripts/resolve-versions.sh`, which asks Docker
-  Hub, PGDG and packagecloud what the newest combination they *all* ship is, for *every*
-  architecture in `PLATFORMS`, and builds that. Compatibility is not a table anyone maintains:
-  a `postgresql-19-postgis-3` package existing is what says PostGIS supports PostgreSQL 19.
-  The newest PostgreSQL major with a stable base image plus both extensions wins, so a new
-  major is adopted by itself once the extensions catch up — and never before.
-* **`RESOLVE_MODE=pinned`** — CI builds exactly what is written in `versions.env`. Edit a
-  number, push, get that image.
+* A weekly [pipeline schedule](https://gitlab.com/KirboDev/agentic-coding/postgresql-postgis-timescaledb/-/pipeline_schedules)
+  runs `scripts/resolve-versions.sh`, which asks Docker Hub, PGDG and packagecloud what the
+  newest combination they *all* ship is, for *every* architecture in `PLATFORMS`. Compatibility
+  is not a table anyone maintains: a `postgresql-19-postgis-3` package existing is what says
+  PostGIS supports PostgreSQL 19. The newest PostgreSQL major with a stable base image plus
+  both extensions wins, so a new major is adopted by itself once the extensions catch up — and
+  never before.
+* If that differs from `versions.env`, the schedule **commits the new numbers** (this file's
+  version list and tag table included) to the default branch and stops. The push pipeline of
+  that commit builds, tests and publishes them — so `git log` is the upgrade history and a
+  bump can be reverted like any other change.
+* If nothing changed, the schedule pipeline rebuilds and republishes the same versions so the
+  Debian base picks up security updates.
+* Every other pipeline (a push, a merge request) builds exactly what `versions.env` says.
+  `RESOLVE_MODE=pinned` in `versions.env` makes the schedule do the same, i.e. freezes the
+  versions until someone edits the file.
 
 The pins in `versions.env` double as the fallback if an upstream lookup fails, and
 `MIN_PG_MAJOR` / `MAX_PG_MAJOR` bound the search (raise `MAX_PG_MAJOR` when PostgreSQL 21
 approaches).
 
-A weekly [pipeline schedule](https://gitlab.com/KirboDev/agentic-coding/postgresql-postgis-timescaledb/-/pipeline_schedules)
-rebuilds and republishes even when the versions have not moved, so the Debian base picks up
-security updates. When a version *has* moved and `VERSIONS_PUSH_TOKEN` is configured, the
-pipeline commits the new numbers back into `versions.env` and this README, so `git log` is the
-upgrade history.
-
 ## Pipeline
 
-Runs on the self-hosted "Kirbo Mini" runner (`macos` tag, docker executor):
+Runs on the self-hosted "Kirbo Mini" runner (`macos` tag, docker executor). One build, tested,
+then re-tagged: the bytes that were tested are the bytes that get published.
 
 | Stage | Job | What it does |
 | --- | --- | --- |
-| resolve | `resolve versions` | resolves the version combination into `build.env` (dotenv artifact) |
-| build | `build and test image` | builds for the runner's arch, starts it, asserts versions, fills a hypertable, runs a spatial query |
-| publish | `publish image` | multi-arch `buildx --push` to Docker Hub (default branch, schedules, or a `PUBLISH=1` manual run) |
-| sync | `sync versions.env` | commits the published versions back (only when `VERSIONS_PUSH_TOKEN` is set) |
+| resolve | `resolve versions` | `build.env` = what to build: `versions.env` (pushes, MRs) or upstream's newest (schedule, which commits it back when it changed and stands the rest of the pipeline down) |
+| lint | `shellcheck`, `hadolint`, `resolver` | scripts and Dockerfile lint; the resolver must reproduce `versions.env` in pinned mode and find something at least as new in auto mode |
+| build | `build image` | one `buildx` build for every platform, pushed to the project's GitLab container registry as `:ci-<pipeline>`; the digest goes downstream |
+| test | `smoke test` (per platform) | pulls that digest and runs it (amd64 under emulation): versions, hypertable, spatial index, LTSS DDL, healthcheck, restart no-op, official defaults |
+| test | `upgrade test` | the previously published images and real PostgreSQL 16 / 17 data directories are taken over by the new image, see above |
+| test | `compose test` | `docker compose up --wait` with the bundled file comes up healthy |
+| test | `vulnerability scan` | Trivy, HIGH/CRITICAL with a fix available; informational (`allow_failure`) |
+| publish | `publish image` | `imagetools create` re-tags the tested digest onto the Docker Hub tags (default branch, schedules, or a `PUBLISH=1` manual run), then verifies every tag resolves to it with every platform |
 
-Nothing is pushed unless the smoke test passed.
+Nothing is published unless every test passed on the exact digest being published.
 
-### Required CI/CD variables
+### Required CI/CD settings
 
-| Variable | Needed for | Notes |
+| Setting | Needed for | Notes |
 | --- | --- | --- |
+| Container registry enabled | staging | default on gitlab.com; add a [cleanup policy](https://docs.gitlab.com/user/packages/container_registry/reduce_container_registry_storage/) for tags matching `ci-.*` |
 | `DOCKERHUB_USERNAME` | publishing | Docker Hub account |
 | `DOCKERHUB_TOKEN` | publishing | Docker Hub access token, **masked** + protected |
-| `VERSIONS_PUSH_TOKEN` | optional version commit-back | project access token, `api` + `write_repository`, Maintainer, allowed to push to the protected default branch |
+| `VERSIONS_PUSH_TOKEN` | version commit-back | project access token, `api` + `write_repository`, Maintainer, allowed to push to the protected default branch; without it the schedule builds the resolved versions directly and warns |
 
-`CI_REGISTRY_USERNAME` / `CI_REGISTRY_PASSWORD` are accepted as aliases for the first two, to
-match the other KirboDev image repositories.
+`CI_REGISTRY_USERNAME` / `CI_REGISTRY_PASSWORD` are accepted as aliases for the Docker Hub
+credentials, to match the other KirboDev image repositories.
+
+## Developing
+
+```bash
+mise install                                                 # shellcheck + hadolint, pinned
+sh scripts/docker-buildx-release.sh local                    # builds postgresql-postgis-timescaledb:local
+sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
+sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local   # ~10 min, pulls old images
+sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
+mise exec -- shellcheck -S warning scripts/*.sh init-*.sh && mise exec -- shellcheck -s bash docker-entrypoint-ppt.sh
+mise exec -- hadolint Dockerfile
+```
 
 ---
 
