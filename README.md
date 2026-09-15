@@ -167,25 +167,26 @@ package at the built version are skipped, so the list follows Timescale's suppor
 corresponds to a commit of it**:
 
 * A weekly [pipeline schedule](https://gitlab.com/KirboDev/agentic-coding/postgresql-postgis-timescaledb/-/pipeline_schedules)
-  runs `scripts/resolve-versions.sh`, which asks Docker Hub, PGDG and packagecloud what the
-  newest combination they *all* ship is, for *every* architecture in `PLATFORMS`. Compatibility
-  is not a table anyone maintains: a `postgresql-19-postgis-3` package existing is what says
-  PostGIS supports PostgreSQL 19. The newest PostgreSQL major with a stable base image plus
-  both extensions wins, so a new major is adopted by itself once the extensions catch up — and
-  never before.
-* If that differs from `versions.env`, the schedule **commits the new numbers** (this file's
-  version list and tag table included) to the default branch and stops. The push pipeline of
+  runs one job: `scripts/resolve-versions.sh` asks Docker Hub, PGDG and packagecloud what the
+  newest combination they *all* ship is, for *every* architecture in `PLATFORMS`, plus the
+  digest of the official `postgres` base image. Compatibility is not a table anyone maintains:
+  a `postgresql-19-postgis-3` package existing is what says PostGIS supports PostgreSQL 19.
+  The newest PostgreSQL major with a stable base image plus both extensions wins, so a new
+  major is adopted by itself once the extensions catch up — and never before.
+* If anything differs from `versions.env`, the schedule **commits the new numbers** (this
+  file's version list and tag table included) to the default branch. The push pipeline of
   that commit builds, tests and publishes them — so `git log` is the upgrade history and a
-  bump can be reverted like any other change.
-* If nothing changed, the schedule pipeline rebuilds and republishes the same versions so the
-  Debian base picks up security updates.
-* Every other pipeline (a push, a merge request) builds exactly what `versions.env` says.
-  `RESOLVE_MODE=pinned` in `versions.env` makes the schedule do the same, i.e. freezes the
+  bump can be reverted like any other change. Nothing newer: no commit, no pipeline.
+* The base image digest is part of that: when docker-library rebuilds
+  `postgres:18.6-trixie` for Debian security updates, the digest moves, the schedule commits
+  it, and the image is republished — without any version number changing. The `FROM` is
+  pinned to that digest, so a build is reproducible.
+* Every pipeline that builds — a push, a merge request, a manual run — builds exactly what
+  `versions.env` says. `RESOLVE_MODE=pinned` makes the schedule a no-op, i.e. freezes the
   versions until someone edits the file.
 
-The pins in `versions.env` double as the fallback if an upstream lookup fails, and
-`MIN_PG_MAJOR` / `MAX_PG_MAJOR` bound the search (raise `MAX_PG_MAJOR` when PostgreSQL 21
-approaches).
+The pins in `versions.env` are also the floor/ceiling for the search: `MIN_PG_MAJOR` /
+`MAX_PG_MAJOR` bound it (raise `MAX_PG_MAJOR` when PostgreSQL 21 approaches).
 
 ## Pipeline
 
@@ -194,14 +195,15 @@ then re-tagged: the bytes that were tested are the bytes that get published.
 
 | Stage | Job | What it does |
 | --- | --- | --- |
-| resolve | `resolve versions` | `build.env` = what to build: `versions.env` (pushes, MRs) or upstream's newest (schedule, which commits it back when it changed and stands the rest of the pipeline down) |
+| resolve | `resolve versions` | `build.env` = the pins in `versions.env` |
+| resolve | `check upstream versions` | **schedule only, and the schedule's only job**: resolves upstream's newest, commits `versions.env` + README when something moved; that commit's pipeline does the rest |
 | lint | `shellcheck`, `hadolint`, `resolver` | scripts and Dockerfile lint; the resolver must reproduce `versions.env` in pinned mode and find something at least as new in auto mode |
 | build | `build image` | one `buildx` build for every platform, pushed to the project's GitLab container registry as `:ci-<pipeline>`; the digest goes downstream |
 | test | `smoke test` (per platform) | pulls that digest and runs it (amd64 under emulation): versions, hypertable, spatial index, LTSS DDL, healthcheck, restart no-op, official defaults |
 | test | `upgrade test` | the previously published images and real PostgreSQL 16 / 17 data directories are taken over by the new image, see above |
 | test | `compose test` | `docker compose up --wait` with the bundled file comes up healthy |
 | test | `vulnerability scan` | Trivy, HIGH/CRITICAL with a fix available; informational (`allow_failure`) |
-| publish | `publish image` | `imagetools create` re-tags the tested digest onto the Docker Hub tags (default branch, schedules, or a `PUBLISH=1` manual run), then verifies every tag resolves to it with every platform |
+| publish | `publish image` | `imagetools create` re-tags the tested digest onto the Docker Hub tags (default branch, or a `PUBLISH=1` manual run), then verifies every tag resolves to it with every platform |
 
 Nothing is published unless every test passed on the exact digest being published.
 
@@ -212,7 +214,7 @@ Nothing is published unless every test passed on the exact digest being publishe
 | Container registry enabled | staging | default on gitlab.com; add a [cleanup policy](https://docs.gitlab.com/user/packages/container_registry/reduce_container_registry_storage/) for tags matching `ci-.*` |
 | `DOCKERHUB_USERNAME` | publishing | Docker Hub account |
 | `DOCKERHUB_TOKEN` | publishing | Docker Hub access token, **masked** + protected |
-| `VERSIONS_PUSH_TOKEN` | version commit-back | project access token, `api` + `write_repository`, Maintainer, allowed to push to the protected default branch; without it the schedule builds the resolved versions directly and warns |
+| `VERSIONS_PUSH_TOKEN` | the weekly schedule | project access token, `api` + `write_repository`, Maintainer, allowed to push to the protected default branch; the schedule fails without it |
 
 `CI_REGISTRY_USERNAME` / `CI_REGISTRY_PASSWORD` are accepted as aliases for the Docker Hub
 credentials, to match the other KirboDev image repositories.

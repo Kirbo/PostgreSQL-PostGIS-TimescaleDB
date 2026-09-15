@@ -23,7 +23,7 @@ OUT="${1:-build.env}"
 # weekly schedule, so a push builds exactly what the commit says.
 RESOLVE_MODE="${RESOLVE_MODE_OVERRIDE:-${RESOLVE_MODE}}"
 
-emit() {
+emit() { # emit SOURCE PG_MAJOR PG_VERSION POSTGIS TIMESCALEDB [PG_IMAGE_DIGEST]
   cat > "$OUT" <<EMIT
 RESOLVED_FROM=$1
 DEBIAN_SUITE=${DEBIAN_SUITE}
@@ -32,6 +32,7 @@ PG_MAJOR=$2
 PG_VERSION=$3
 POSTGIS_VERSION=$4
 TIMESCALEDB_VERSION=$5
+PG_IMAGE_DIGEST=${6:-${PG_IMAGE_DIGEST}}
 EMIT
   echo "--- ${OUT} ---"
   cat "$OUT"
@@ -85,6 +86,14 @@ latest_pg_patch() { # latest_pg_patch <major>
     | sort -t. -k1,1n -k2,2n | tail -n 1
 }
 
+# Manifest-list digest of postgres:<tag> on Docker Hub — the top-level "digest" of the tag
+# object, not the per-architecture ones inside its "images" array.
+pg_image_digest() { # pg_image_digest <tag>
+  fetch "https://hub.docker.com/v2/repositories/library/postgres/tags/$1" 2>/dev/null \
+    | sed 's/"images": *\[[^]]*\]//' | tr ',' '\n' \
+    | sed -n 's/.*"digest": *"\(sha256:[0-9a-f]*\)".*/\1/p' | head -n 1
+}
+
 major="$MAX_PG_MAJOR"
 while [ "$major" -ge "$MIN_PG_MAJOR" ]; do
   echo "==> checking PostgreSQL ${major}"
@@ -100,7 +109,14 @@ while [ "$major" -ge "$MIN_PG_MAJOR" ]; do
   echo "    image=postgres:${pg_patch}-${DEBIAN_SUITE} postgis=${gis:-none} timescaledb=${ts:-none}"
 
   if [ -n "$gis" ] && [ -n "$ts" ]; then
-    emit auto "$major" "$pg_patch" "$gis" "$ts"
+    digest="$(pg_image_digest "${pg_patch}-${DEBIAN_SUITE}" || true)"
+    if [ -z "$digest" ]; then
+      echo "WARNING: could not read the digest of postgres:${pg_patch}-${DEBIAN_SUITE} — falling back to the pins in versions.env" >&2
+      emit "pinned-fallback" "$PG_MAJOR" "$PG_VERSION" "$POSTGIS_VERSION" "$TIMESCALEDB_VERSION"
+      exit 0
+    fi
+    echo "    base image digest ${digest}"
+    emit auto "$major" "$pg_patch" "$gis" "$ts" "$digest"
     exit 0
   fi
   major=$((major - 1))

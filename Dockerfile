@@ -14,8 +14,11 @@
 
 ARG PG_VERSION=18.6
 ARG DEBIAN_SUITE=trixie
+# Manifest-list digest of that tag (versions.env's PG_IMAGE_DIGEST). Empty = whatever the tag
+# points at today; set = reproducible, and what CI always does.
+ARG PG_IMAGE_DIGEST=
 
-FROM postgres:${PG_VERSION}-${DEBIAN_SUITE}
+FROM postgres:${PG_VERSION}-${DEBIAN_SUITE}${PG_IMAGE_DIGEST:+@${PG_IMAGE_DIGEST}}
 
 # Re-declare after FROM: ARGs above FROM are not visible inside the build stage.
 # PG_MAJOR is already an ENV in the base image, so it is deliberately NOT an ARG here — the

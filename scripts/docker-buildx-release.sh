@@ -40,11 +40,12 @@ COMBO="${PG_VERSION}-postgis${POSTGIS_VERSION}-timescaledb${TIMESCALEDB_VERSION}
 STAGING_TAG="${STAGING_IMAGE:-}:ci-${CI_PIPELINE_ID:-local}"
 
 build() { # build [buildx args...]
-  echo "==> ${MODE}: PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION} (${DEBIAN_SUITE})"
+  echo "==> ${MODE}: PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION} (${DEBIAN_SUITE}${PG_IMAGE_DIGEST:+ @ ${PG_IMAGE_DIGEST}})"
   docker buildx build \
     ${BUILDER_NAME:+--builder "${BUILDER_NAME}"} \
     --build-arg PG_VERSION="${PG_VERSION}" \
     --build-arg DEBIAN_SUITE="${DEBIAN_SUITE}" \
+    --build-arg PG_IMAGE_DIGEST="${PG_IMAGE_DIGEST:-}" \
     --build-arg POSTGIS_VERSION="${POSTGIS_VERSION}" \
     --build-arg TIMESCALEDB_VERSION="${TIMESCALEDB_VERSION}" \
     --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \

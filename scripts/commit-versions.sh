@@ -21,19 +21,29 @@ emit() { echo "CHANGED=$1" | tee versions-commit.env; }
 . ./build.env
 NEW_PG_MAJOR="$PG_MAJOR"; NEW_PG="$PG_VERSION"
 NEW_GIS="$POSTGIS_VERSION"; NEW_TS="$TIMESCALEDB_VERSION"
-NEW_SUITE="$DEBIAN_SUITE"
+NEW_SUITE="$DEBIAN_SUITE"; NEW_DIGEST="$PG_IMAGE_DIGEST"
 
 # shellcheck disable=SC1091
 . ./versions.env
 
 if [ "$NEW_PG" = "$PG_VERSION" ] && [ "$NEW_GIS" = "$POSTGIS_VERSION" ] &&
-   [ "$NEW_TS" = "$TIMESCALEDB_VERSION" ] && [ "$NEW_PG_MAJOR" = "$PG_MAJOR" ]; then
-  echo "versions.env already holds the newest upstream combination (PostgreSQL ${NEW_PG}, PostGIS ${NEW_GIS}, TimescaleDB ${NEW_TS}) — nothing to commit"
+   [ "$NEW_TS" = "$TIMESCALEDB_VERSION" ] && [ "$NEW_PG_MAJOR" = "$PG_MAJOR" ] &&
+   [ "$NEW_DIGEST" = "$PG_IMAGE_DIGEST" ]; then
+  echo "versions.env already holds the newest upstream combination (PostgreSQL ${NEW_PG} @ ${NEW_DIGEST}, PostGIS ${NEW_GIS}, TimescaleDB ${NEW_TS}) — nothing to commit"
   emit false
   exit 0
 fi
 
-echo "==> updating versions.env: PostgreSQL ${PG_VERSION} -> ${NEW_PG}, PostGIS ${POSTGIS_VERSION} -> ${NEW_GIS}, TimescaleDB ${TIMESCALEDB_VERSION} -> ${NEW_TS}"
+if [ "$NEW_PG" = "$PG_VERSION" ] && [ "$NEW_GIS" = "$POSTGIS_VERSION" ] && [ "$NEW_TS" = "$TIMESCALEDB_VERSION" ]; then
+  SUBJECT="chore: rebuild on the refreshed postgres:${NEW_PG}-${NEW_SUITE} base image"
+  BODY="Same PostgreSQL ${NEW_PG} + PostGIS ${NEW_GIS} + TimescaleDB ${NEW_TS}; the official base
+image was rebuilt upstream (${PG_IMAGE_DIGEST} -> ${NEW_DIGEST}), typically for Debian
+security updates."
+else
+  SUBJECT="chore: PostgreSQL ${NEW_PG} + PostGIS ${NEW_GIS} + TimescaleDB ${NEW_TS}"
+  BODY="Was PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION}."
+fi
+echo "==> updating versions.env: PostgreSQL ${PG_VERSION} -> ${NEW_PG}, PostGIS ${POSTGIS_VERSION} -> ${NEW_GIS}, TimescaleDB ${TIMESCALEDB_VERSION} -> ${NEW_TS}, base ${PG_IMAGE_DIGEST} -> ${NEW_DIGEST}"
 if [ -z "${VERSIONS_PUSH_TOKEN:-}" ]; then
   echo "ERROR: VERSIONS_PUSH_TOKEN is not set — cannot push the version bump" >&2
   exit 1
@@ -47,6 +57,7 @@ set_var PG_VERSION "$NEW_PG" versions.env
 set_var POSTGIS_VERSION "$NEW_GIS" versions.env
 set_var TIMESCALEDB_VERSION "$NEW_TS" versions.env
 set_var DEBIAN_SUITE "$NEW_SUITE" versions.env
+set_var PG_IMAGE_DIGEST "$NEW_DIGEST" versions.env
 
 # README carries the same numbers between the markers, regenerated wholesale.
 awk -v pg="$NEW_PG" -v gis="$NEW_GIS" -v ts="$NEW_TS" '
@@ -91,7 +102,9 @@ fi
 git config user.email "${GITLAB_USER_EMAIL:-ci@noreply.gitlab.com}"
 git config user.name "${GITLAB_USER_NAME:-GitLab CI}"
 git add versions.env README.md
-git commit -q -m "chore: PostgreSQL ${NEW_PG} + PostGIS ${NEW_GIS} + TimescaleDB ${NEW_TS}
+git commit -q -m "${SUBJECT}
+
+${BODY}
 
 Resolved from upstream by scheduled pipeline ${CI_PIPELINE_ID:-local}; the pipeline of this
 commit builds, tests and publishes it."
