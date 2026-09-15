@@ -46,7 +46,9 @@ if [ "${PREVIOUS_IMAGES+set}" != set ]; then
   [ -z "$oldest" ] || PREVIOUS_IMAGES="${PREVIOUS_IMAGES} docker.io/${HUB_REPO}:${oldest}"
 fi
 FIXTURE_PREFIX="${FIXTURE_PREFIX:-ppt-upgrade-fixture}"
-RUN_ID="$$"
+# Unique per run even on a shared daemon: CI jobs all start with the same PIDs, so $$ alone
+# would collide across parallel jobs (and one job's cleanup would remove another's container).
+RUN_ID="${CI_JOB_ID:-$$}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 PW="upgrade-test-only"
 
 # --- helpers ----------------------------------------------------------------------------------

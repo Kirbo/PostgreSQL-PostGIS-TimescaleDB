@@ -14,7 +14,10 @@ IMAGE="${1:?usage: smoke-test.sh IMAGE}"
 # shellcheck disable=SC1091
 if [ -f build.env ]; then . ./build.env; else . ./versions.env; fi
 
-NAME="ppt-smoke-$$"
+# Unique per run even on a shared daemon: CI jobs all start with the same PIDs, so $$ alone
+# would collide across parallel jobs (and one job's cleanup would remove another's container).
+RUN_ID="${CI_JOB_ID:-$$}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+NAME="ppt-smoke-${RUN_ID}"
 PASSWORD="smoke-test-only"
 PLATFORM_ARGS="${PLATFORM:+--platform $PLATFORM}"
 

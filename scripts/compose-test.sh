@@ -5,7 +5,10 @@
 set -eu
 
 IMAGE="${1:?usage: compose-test.sh IMAGE}"
-PROJECT="ppt-compose-$$"
+# Unique per run even on a shared daemon: CI jobs all start with the same PIDs, so $$ alone
+# would collide across parallel jobs (and one job's cleanup would remove another's container).
+RUN_ID="${CI_JOB_ID:-$$}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+PROJECT="ppt-compose-${RUN_ID}"
 
 cleanup() {
   if [ "${KEEP_LOGS:-1}" = "1" ]; then
