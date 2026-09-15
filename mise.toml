@@ -2,3 +2,7 @@
 [tools]
 shellcheck = "0.11.0"
 hadolint = "2.15.1"
+
+[tasks."gitlab:rotate-pat"]
+description = "Self-rotate the GitLab project token, save it to 1Password, update the VERSIONS_PUSH_TOKEN CI variable"
+run = "scripts/rotate-gitlab-pat.sh"

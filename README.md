@@ -219,6 +219,12 @@ Nothing is published unless every test passed on the exact digest being publishe
 `CI_REGISTRY_USERNAME` / `CI_REGISTRY_PASSWORD` are accepted as aliases for the Docker Hub
 credentials, to match the other KirboDev image repositories.
 
+`VERSIONS_PUSH_TOKEN` lives in 1Password ("PostgreSQL PostGIS TimescaleDB - GitLab API Token",
+Personal vault, with its expiry in the `expires` field). `mise run gitlab:rotate-pat` (or
+`scripts/rotate-gitlab-pat.sh`) rotates it through GitLab's self-rotate endpoint, writes the new
+token and expiry back to 1Password and updates the CI/CD variable — the same script the other
+KirboDev repositories carry, so one command per project keeps every token current.
+
 ## Developing
 
 ```bash
