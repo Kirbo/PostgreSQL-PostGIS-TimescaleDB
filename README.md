@@ -11,7 +11,7 @@ built for `linux/amd64` and `linux/arm64`.
 
 * **PostgreSQL 18.6** — [release notes](https://www.postgresql.org/docs/release/)
 * **PostGIS 3.6.4** — [release notes](https://github.com/postgis/postgis/releases/tag/3.6.4)
-* **TimescaleDB 2.30.0** — [release notes](https://github.com/timescale/timescaledb/releases/tag/2.30.0)
+* **TimescaleDB 2.30.1** — [release notes](https://github.com/timescale/timescaledb/releases/tag/2.30.1)
 
 <!-- versions:end -->
 
@@ -30,7 +30,7 @@ install rather than a source compile, on both architectures.
 | `latest` | the newest build |
 | `18` | newest build of that PostgreSQL major |
 | `18.6` | newest build of that PostgreSQL version |
-| `18.6-postgis3.6.4-timescaledb2.30.0` | that exact version combination |
+| `18.6-postgis3.6.4-timescaledb2.30.1` | that exact version combination |
 
 <!-- tags:end -->
 
