@@ -45,6 +45,7 @@ build() { # build [buildx args...]
   docker buildx build \
     ${BUILDER_NAME:+--builder "${BUILDER_NAME}"} \
     --build-arg PG_VERSION="${PG_VERSION}" \
+    --build-arg PPT_PG_VERSION="${PG_VERSION}" \
     --build-arg DEBIAN_SUITE="${DEBIAN_SUITE}" \
     --build-arg PG_IMAGE_DIGEST="${PG_IMAGE_DIGEST:-}" \
     --build-arg POSTGIS_VERSION="${POSTGIS_VERSION}" \

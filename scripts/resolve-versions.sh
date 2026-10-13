@@ -68,10 +68,14 @@ done
 
 # Highest version of PKG that is present in EVERY arch's index, reduced to its upstream form
 # (3.6.4+dfsg-2.pgdg13+1 -> 3.6.4, 2.29.2~debian13-1806 -> 2.29.2, 1:3.6.4-1 -> 3.6.4).
+# Pre-releases (3.7.0~beta1+dfsg-1, 2.31.0-rc1~debian13) are dropped BEFORE that reduction,
+# which would otherwise turn them into the final version number.
 common_max_version() { # common_max_version <index-prefix> <package>
   for arch in $ARCHES; do
     awk -v pkg="$2" '$1 == "Package:" { p = ($2 == pkg); next } p && $1 == "Version:" { print $2 }' "$TMP/$1-$arch" \
-      | sed 's/^[0-9]*://; s/[^0-9.].*$//; s/\.$//' \
+      | sed 's/^[0-9]*://' \
+      | grep -Eiv '^[0-9.]+[~-](alpha|beta|rc|dev)' \
+      | sed 's/[^0-9.].*$//; s/\.$//' \
       | sort -u
   done | sort | uniq -c | awk -v n="$ARCH_COUNT" '$1 == n { print $2 }' \
     | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1

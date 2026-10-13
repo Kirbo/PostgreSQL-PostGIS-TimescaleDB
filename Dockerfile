@@ -32,11 +32,17 @@ ARG TIMESCALEDB_VERSION=2.30.2
 # skipped (Timescale requires the same extension version on both sides of pg_upgrade), which
 # is what bounds the list in practice. Set to PG_MAJOR to bundle nothing.
 ARG MIN_UPGRADE_FROM_MAJOR=15
+# Fingerprint of packagecloud's signing key for the TimescaleDB repo. The key is fetched at
+# build time; a different one fails the build instead of being trusted.
+ARG TIMESCALEDB_KEY_FINGERPRINT=1005FB68604CE9B8F6879CF759F18EDF47F24417
+# Only for the description label: inside this stage ${PG_VERSION} is the base image's ENV
+# (the Debian package version, e.g. 18.6-1.pgdg13+2), which always wins over a build arg.
+ARG PPT_PG_VERSION
 ARG BUILD_DATE
 ARG VCS_REF
 
 LABEL org.opencontainers.image.title="PostgreSQL + PostGIS + TimescaleDB" \
-      org.opencontainers.image.description="PostgreSQL ${PG_VERSION} with PostGIS ${POSTGIS_VERSION} and TimescaleDB ${TIMESCALEDB_VERSION}" \
+      org.opencontainers.image.description="PostgreSQL ${PPT_PG_VERSION:-${PG_MAJOR}} with PostGIS ${POSTGIS_VERSION} and TimescaleDB ${TIMESCALEDB_VERSION}" \
       org.opencontainers.image.source="https://gitlab.com/KirboDev/agentic-coding/postgresql-postgis-timescaledb" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.created="${BUILD_DATE}" \
@@ -55,21 +61,27 @@ apt-get install -y --no-install-recommends ca-certificates curl gnupg
 
 # TimescaleDB apt repo. PGDG is already wired up by the base image
 # (/etc/apt/sources.list.d/pgdg.list, components "main ${PG_MAJOR}").
-curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey \
-  | gpg --dearmor -o /usr/share/keyrings/timescaledb.gpg
+curl -fsSL -o /tmp/timescaledb.key https://packagecloud.io/timescale/timescaledb/gpgkey
+fpr="$(GNUPGHOME="$(mktemp -d)" gpg --show-keys --with-colons /tmp/timescaledb.key | awk -F: '$1 == "fpr" { print $10; exit }')"
+[ "$fpr" = "${TIMESCALEDB_KEY_FINGERPRINT}" ] \
+  || { echo "ERROR: TimescaleDB repo key fingerprint is '${fpr}', expected '${TIMESCALEDB_KEY_FINGERPRINT}'" >&2; exit 1; }
+gpg --dearmor < /tmp/timescaledb.key > /usr/share/keyrings/timescaledb.gpg
+rm -f /tmp/timescaledb.key
 echo "deb [signed-by=/usr/share/keyrings/timescaledb.gpg] https://packagecloud.io/timescale/timescaledb/debian/ ${DEBIAN_SUITE} main" \
   > /etc/apt/sources.list.d/timescaledb.list
 apt-get update
 
 # Map an UPSTREAM version (3.6.4) to the exact Debian revision in the repo
 # (3.6.4+dfsg-2.pgdg13+1), highest first — apt-cache madison lists in preference order.
-# Matching on "<want>" or "<want>" followed by a separator stops 3.6.4 from matching 3.6.41.
+# Matching on "<want>" or "<want>" followed by a separator stops 3.6.4 from matching 3.6.41;
+# a pre-release of that version (3.7.0~beta1, 2.31.0-rc1) is never a match.
 # An empty result aborts the build: better a red pipeline than an image that silently
 # contains a different version than the one it is tagged with.
 resolve_pkg() {
   apt-cache madison "$1" | awk -F'|' '{ gsub(/ /, "", $2); print $2 }' \
     | while read -r ver; do
         case "$ver" in
+          "$2"[~-][Aa][Ll][Pp][Hh][Aa]* | "$2"[~-][Bb][Ee][Tt][Aa]* | "$2"[~-][Rr][Cc]* | "$2"[~-][Dd][Ee][Vv]*) ;;
           "$2" | "$2"[+~-]*) echo "$ver"; break ;;
         esac
       done
