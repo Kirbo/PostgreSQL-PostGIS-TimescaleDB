@@ -251,7 +251,7 @@ KirboDev repositories carry, so one command per project keeps every token curren
 mise install                                                 # shellcheck + hadolint, pinned
 sh scripts/docker-buildx-release.sh local                    # builds postgresql-postgis-timescaledb:local
 sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
-sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local   # ~10 min, pulls old images
+sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local   # ~15 min, pulls old images
 sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
 mise exec -- shellcheck -S warning scripts/*.sh init-*.sh && mise exec -- shellcheck -s bash docker-entrypoint-ppt.sh
 mise exec -- hadolint Dockerfile

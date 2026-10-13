@@ -116,7 +116,7 @@ sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
 sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
 ```
 
-Run `sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local` (~10 min, pulls old
+Run `sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local` (~15 min, pulls old
 images) when the `Dockerfile`, `docker-entrypoint-ppt.sh`, `init-*.sh`, `DEBIAN_SUITE` or any
 upgrade bound changed. Local runs cover the host arch only; amd64 is covered by CI's smoke-test
 matrix — say so in the report rather than claiming it.

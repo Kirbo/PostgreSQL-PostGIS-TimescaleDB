@@ -63,7 +63,7 @@ RESOLVE_MODE_OVERRIDE=auto   sh scripts/resolve-versions.sh auto.env     # must 
 sh scripts/docker-buildx-release.sh local
 sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
 sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
-sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local          # ~10 min; skip only with --quick, and say so
+sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local          # ~15 min; skip only with --quick, and say so
 trivy image --severity HIGH,CRITICAL --ignore-unfixed postgresql-postgis-timescaledb:local
 ```
 
