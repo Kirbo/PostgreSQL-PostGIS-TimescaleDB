@@ -12,6 +12,9 @@
 # Needs VERSIONS_PUSH_TOKEN (project access token, api + write_repository, allowed to push to
 # the protected default branch) — the CI job token cannot push.
 set -eu
+# shellcheck source=scripts/output.sh
+. "$(dirname "$0")/output.sh"
+trap section_close EXIT
 
 [ -f build.env ] || { echo "build.env missing — nothing to commit"; exit 1; }
 
@@ -43,9 +46,9 @@ else
   SUBJECT="chore: PostgreSQL ${NEW_PG} + PostGIS ${NEW_GIS} + TimescaleDB ${NEW_TS}"
   BODY="Was PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION}."
 fi
-echo "==> updating versions.env: PostgreSQL ${PG_VERSION} -> ${NEW_PG}, PostGIS ${POSTGIS_VERSION} -> ${NEW_GIS}, TimescaleDB ${TIMESCALEDB_VERSION} -> ${NEW_TS}, base ${PG_IMAGE_DIGEST} -> ${NEW_DIGEST}"
+section "updating versions.env: PostgreSQL ${PG_VERSION} -> ${NEW_PG}, PostGIS ${POSTGIS_VERSION} -> ${NEW_GIS}, TimescaleDB ${TIMESCALEDB_VERSION} -> ${NEW_TS}, base ${PG_IMAGE_DIGEST} -> ${NEW_DIGEST}"
 if [ -z "${VERSIONS_PUSH_TOKEN:-}" ]; then
-  echo "ERROR: VERSIONS_PUSH_TOKEN is not set — cannot push the version bump" >&2
+  echo "${C_FAIL}ERROR:${C_OFF} VERSIONS_PUSH_TOKEN is not set — cannot push the version bump" >&2
   exit 1
 fi
 
@@ -113,5 +116,5 @@ commit builds, tests and publishes it."
 git push \
   "https://oauth2:${VERSIONS_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
   "HEAD:${CI_DEFAULT_BRANCH}"
-echo "==> pushed to ${CI_DEFAULT_BRANCH}; its pipeline will build and publish these versions"
+section "pushed to ${CI_DEFAULT_BRANCH}; its pipeline will build and publish these versions"
 emit true

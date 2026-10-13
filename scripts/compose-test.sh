@@ -3,6 +3,8 @@
 # `docker compose up --wait` (what a user runs) works, and the healthcheck it relies on is
 # sane. The compose project is torn down with its volume afterwards.
 set -eu
+# shellcheck source=scripts/output.sh
+. "$(dirname "$0")/output.sh"
 
 IMAGE="${1:?usage: compose-test.sh IMAGE}"
 # Unique per run even on a shared daemon: CI jobs all start with the same PIDs, so $$ alone
@@ -11,6 +13,7 @@ RUN_ID="${CI_JOB_ID:-$$}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 PROJECT="ppt-compose-${RUN_ID}"
 
 cleanup() {
+  section_close
   if [ "${KEEP_LOGS:-1}" = "1" ]; then
     echo "--- compose logs ---"
     PPT_IMAGE="$IMAGE" docker compose -p "$PROJECT" logs --tail 60 2>&1 || true
@@ -19,7 +22,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> docker compose up --wait with ${IMAGE}"
+section "docker compose up --wait with ${IMAGE}"
 # The compose file publishes 5432; in CI another container may hold it, so an override file
 # drops the port mapping (everything else is the user's file, untouched).
 cat > "compose-${PROJECT}.override.yml" <<'YML'
@@ -31,13 +34,14 @@ PPT_IMAGE="$IMAGE" docker compose -p "$PROJECT" -f docker-compose.yml -f "compos
   up -d --wait --wait-timeout 300
 rm -f "compose-${PROJECT}.override.yml"
 
-echo "==> asserting the service is healthy and both extensions are in the homeassistant database"
+section "asserting the service is healthy and both extensions are in the homeassistant database"
 status="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose -p "$PROJECT" ps -q postgres)")"
-[ "$status" = healthy ] || { echo "FAIL: service status is '${status}', expected healthy" >&2; exit 1; }
+[ "$status" = healthy ] || { echo "${C_FAIL}FAIL:${C_OFF} service status is '${status}', expected healthy" >&2; exit 1; }
 exts="$(docker compose -p "$PROJECT" exec -T postgres psql -X -A -t -U homeassistant -d homeassistant \
   -c "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname <> 'plpgsql'")"
-[ "$exts" = "postgis,postgis_topology,timescaledb" ] || { echo "FAIL: extensions are '${exts}'" >&2; exit 1; }
-echo "ok: healthy, extensions = ${exts}"
+[ "$exts" = "postgis,postgis_topology,timescaledb" ] || { echo "${C_FAIL}FAIL:${C_OFF} extensions are '${exts}'" >&2; exit 1; }
+echo "${C_OK}ok:${C_OFF} healthy, extensions = ${exts}"
 
 KEEP_LOGS=0
-echo "==> compose test PASSED for ${IMAGE}"
+section_close
+echo "${C_PASS}==> compose test PASSED for ${IMAGE}${C_OFF}"

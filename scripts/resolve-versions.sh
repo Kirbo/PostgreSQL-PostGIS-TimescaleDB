@@ -15,6 +15,8 @@
 # If RESOLVE_MODE is not "auto", or a lookup fails, the pins in versions.env are used verbatim.
 # Needs: curl, awk, sed, sort, gzip.
 set -eu
+# shellcheck source=scripts/output.sh
+. "$(dirname "$0")/output.sh"
 
 OUT="${1:-build.env}"
 # shellcheck disable=SC1091
@@ -45,7 +47,7 @@ if [ "${RESOLVE_MODE}" != "auto" ]; then
 fi
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"; section_close' EXIT
 
 fetch() { curl -fsSL --retry 3 --retry-delay 2 --max-time 120 "$1"; }
 
@@ -53,14 +55,14 @@ fetch() { curl -fsSL --retry 3 --retry-delay 2 --max-time 120 "$1"; }
 ARCHES="$(echo "$PLATFORMS" | tr ',' '\n' | sed 's|.*/||' | tr '\n' ' ')"
 ARCH_COUNT="$(echo "$ARCHES" | wc -w | tr -d ' ')"
 
-echo "==> fetching package indexes for suite '${DEBIAN_SUITE}', arches: ${ARCHES}"
+section "fetching package indexes for suite '${DEBIAN_SUITE}', arches: ${ARCHES}"
 for arch in $ARCHES; do
   fetch "https://apt.postgresql.org/pub/repos/apt/dists/${DEBIAN_SUITE}-pgdg/main/binary-${arch}/Packages.gz" \
     | gzip -dc > "$TMP/pgdg-$arch" 2>/dev/null || : > "$TMP/pgdg-$arch"
   fetch "https://packagecloud.io/timescale/timescaledb/debian/dists/${DEBIAN_SUITE}/main/binary-${arch}/Packages" \
     > "$TMP/ts-$arch" 2>/dev/null || : > "$TMP/ts-$arch"
   if [ ! -s "$TMP/pgdg-$arch" ] || [ ! -s "$TMP/ts-$arch" ]; then
-    echo "WARNING: could not read an upstream package index for ${arch} — falling back to the pins in versions.env" >&2
+    echo "${C_WARN}WARNING:${C_OFF} could not read an upstream package index for ${arch} — falling back to the pins in versions.env" >&2
     emit "pinned-fallback" "$PG_MAJOR" "$PG_VERSION" "$POSTGIS_VERSION" "$TIMESCALEDB_VERSION"
     exit 0
   fi
@@ -100,7 +102,7 @@ pg_image_digest() { # pg_image_digest <tag>
 
 major="$MAX_PG_MAJOR"
 while [ "$major" -ge "$MIN_PG_MAJOR" ]; do
-  echo "==> checking PostgreSQL ${major}"
+  section "checking PostgreSQL ${major}"
   pg_patch="$(latest_pg_patch "$major" || true)"
   if [ -z "$pg_patch" ]; then
     echo "    no stable postgres:${major}.x-${DEBIAN_SUITE} image"
@@ -115,7 +117,7 @@ while [ "$major" -ge "$MIN_PG_MAJOR" ]; do
   if [ -n "$gis" ] && [ -n "$ts" ]; then
     digest="$(pg_image_digest "${pg_patch}-${DEBIAN_SUITE}" || true)"
     if [ -z "$digest" ]; then
-      echo "WARNING: could not read the digest of postgres:${pg_patch}-${DEBIAN_SUITE} — falling back to the pins in versions.env" >&2
+      echo "${C_WARN}WARNING:${C_OFF} could not read the digest of postgres:${pg_patch}-${DEBIAN_SUITE} — falling back to the pins in versions.env" >&2
       emit "pinned-fallback" "$PG_MAJOR" "$PG_VERSION" "$POSTGIS_VERSION" "$TIMESCALEDB_VERSION"
       exit 0
     fi
@@ -126,5 +128,5 @@ while [ "$major" -ge "$MIN_PG_MAJOR" ]; do
   major=$((major - 1))
 done
 
-echo "WARNING: no PostgreSQL major between ${MIN_PG_MAJOR} and ${MAX_PG_MAJOR} had both extensions — falling back to the pins in versions.env" >&2
+echo "${C_WARN}WARNING:${C_OFF} no PostgreSQL major between ${MIN_PG_MAJOR} and ${MAX_PG_MAJOR} had both extensions — falling back to the pins in versions.env" >&2
 emit "pinned-fallback" "$PG_MAJOR" "$PG_VERSION" "$POSTGIS_VERSION" "$TIMESCALEDB_VERSION"

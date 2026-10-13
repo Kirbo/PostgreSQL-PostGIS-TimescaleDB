@@ -28,6 +28,8 @@
 #        extension-update path is exercised even when :latest is already current). "" skips.
 #      UPGRADE_FROM_MAJORS (default: what the image reports), FIXTURE_PREFIX.
 set -eu
+# shellcheck source=scripts/output.sh
+. "$(dirname "$0")/output.sh"
 
 IMAGE="${1:?usage: upgrade-test.sh IMAGE}"
 # shellcheck disable=SC1091
@@ -56,11 +58,14 @@ PW="upgrade-test-only"
 
 # --- helpers ----------------------------------------------------------------------------------
 
-log()  { printf '\n==> %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# Every scenario is a folded section in the GitLab job log: hundreds of ok lines otherwise. A
+# failure is printed after the section is closed, so it is never folded away.
+SECTION_COLLAPSED=true
+log()  { section "$*"; }
+fail() { section_close; printf '%sFAIL:%s %s\n' "$C_FAIL" "$C_OFF" "$*" >&2; exit 1; }
 
 assert_eq() { # assert_eq LABEL EXPECTED ACTUAL
-  if [ "$2" = "$3" ]; then echo "ok: $1 = $3"; else fail "$1 — expected '$2', got '$3'"; fi
+  if [ "$2" = "$3" ]; then echo "${C_OK}ok:${C_OFF} $1 = $3"; else fail "$1 — expected '$2', got '$3'"; fi
 }
 
 CONTAINERS=""
@@ -68,6 +73,7 @@ VOLUMES=""
 IMAGES=""   # fixtures built and previous images pulled by THIS run, removed at the end
 cleanup() {
   status=$?
+  section_close
   if [ "$status" != 0 ]; then
     for c in $CONTAINERS; do
       echo "--- logs of $c ---"; docker logs "$c" 2>&1 | tail -n 80 || true
@@ -384,4 +390,5 @@ if [ -n "$UPGRADE_FROM_MAJORS" ]; then
   assert_eq "old cluster untouched" "$major" "$(docker run --rm -v "$v:/var/lib/postgresql/data" "$IMAGE" cat /var/lib/postgresql/data/PG_VERSION)"
 fi
 
-log "upgrade tests PASSED for ${IMAGE}"
+section_close
+printf '\n%s==> upgrade tests PASSED for %s%s\n' "$C_PASS" "$IMAGE" "$C_OFF"

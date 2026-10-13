@@ -8,6 +8,8 @@
 # PLATFORM=linux/amd64 runs the container for that platform (QEMU / Rosetta emulation when it
 # is not the host's own) — the pipeline does this for every published architecture.
 set -eu
+# shellcheck source=scripts/output.sh
+. "$(dirname "$0")/output.sh"
 
 IMAGE="${1:?usage: smoke-test.sh IMAGE}"
 
@@ -22,6 +24,7 @@ PASSWORD="smoke-test-only"
 PLATFORM_ARGS="${PLATFORM:+--platform $PLATFORM}"
 
 cleanup() {
+  section_close
   # Logs first: on a failed assertion they are the only record of what the server did.
   if [ "${KEEP_LOGS:-1}" = "1" ]; then
     echo "--- container logs ---"
@@ -32,7 +35,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> starting $IMAGE as $NAME${PLATFORM:+ ($PLATFORM)}"
+section "starting $IMAGE as $NAME${PLATFORM:+ ($PLATFORM)}"
 # shellcheck disable=SC2086
 docker run -d --name "$NAME" $PLATFORM_ARGS \
   -e POSTGRES_PASSWORD="$PASSWORD" \
@@ -40,12 +43,12 @@ docker run -d --name "$NAME" $PLATFORM_ARGS \
   -e POSTGRES_DB=smoke \
   "$IMAGE" >/dev/null
 
-echo "==> waiting for the server to accept connections"
+section "waiting for the server to accept connections"
 i=0
 until docker exec "$NAME" pg_isready -U smoke -d smoke >/dev/null 2>&1; do
   i=$((i + 1))
   if [ "$i" -gt 120 ]; then
-    echo "ERROR: server did not become ready within 120s" >&2
+    echo "${C_FAIL}ERROR:${C_OFF} server did not become ready within 120s" >&2
     exit 1
   fi
   sleep 1
@@ -56,7 +59,7 @@ i=0
 until docker exec "$NAME" pg_isready -h 127.0.0.1 -U smoke -d smoke >/dev/null 2>&1; do
   i=$((i + 1))
   if [ "$i" -gt 120 ]; then
-    echo "ERROR: init scripts did not finish within 120s" >&2
+    echo "${C_FAIL}ERROR:${C_OFF} init scripts did not finish within 120s" >&2
     exit 1
   fi
   sleep 1
@@ -66,14 +69,15 @@ q() { docker exec "$NAME" psql -X -A -t -q -v ON_ERROR_STOP=1 -U smoke -d smoke 
 
 assert_eq() { # assert_eq LABEL EXPECTED ACTUAL
   if [ "$2" = "$3" ]; then
-    echo "ok: $1 = $3"
+    echo "${C_OK}ok:${C_OFF} $1 = $3"
   else
-    echo "FAIL: $1 — expected '$2', got '$3'" >&2
+    section_close
+    echo "${C_FAIL}FAIL:${C_OFF} $1 — expected '$2', got '$3'" >&2
     exit 1
   fi
 }
 
-echo "==> asserting versions"
+section "asserting versions"
 # Asked of the running container, not the daemon's image record: parallel jobs pull the same
 # digest for different platforms into one shared daemon, and the record follows the last pull.
 case "${PLATFORM:-$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')}" in
@@ -92,25 +96,25 @@ assert_eq "template_postgis is a template" "t" "$(q "SELECT datistemplate FROM p
 # it cannot bundle, so this is the check that stops such an image from being published.
 bundled="$(docker exec "$NAME" sh -c '. /etc/ppt-upgrade-from.env && echo "$PPT_UPGRADE_FROM_MAJORS"')"
 case " ${bundled} " in
-  *" $((PG_MAJOR - 1)) "*) echo "ok: PostgreSQL $((PG_MAJOR - 1)) is upgradable (bundled: ${bundled})" ;;
+  *" $((PG_MAJOR - 1)) "*) echo "${C_OK}ok:${C_OFF} PostgreSQL $((PG_MAJOR - 1)) is upgradable (bundled: ${bundled})" ;;
   *) assert_eq "previous major bundled for the automatic upgrade" "$((PG_MAJOR - 1))" "${bundled:-<none>}" ;;
 esac
 
-echo "==> exercising TimescaleDB (hypertable + chunks)"
+section "exercising TimescaleDB (hypertable + chunks)"
 q "CREATE TABLE readings (ts timestamptz NOT NULL, sensor int, value double precision);" >/dev/null
 q "SELECT create_hypertable('readings', 'ts');" >/dev/null
 q "INSERT INTO readings SELECT now() - (s || ' minutes')::interval, s % 5, random() FROM generate_series(1, 1000) s;" >/dev/null
 assert_eq "hypertable rows" "1000" "$(q "SELECT count(*) FROM readings;")"
 assert_eq "chunks created"  "t"    "$(q "SELECT count(*) > 0 FROM timescaledb_information.chunks WHERE hypertable_name = 'readings';")"
 
-echo "==> exercising PostGIS (geometry + spatial index + distance query)"
+section "exercising PostGIS (geometry + spatial index + distance query)"
 q "CREATE TABLE places (id serial PRIMARY KEY, geom geometry(Point, 4326));" >/dev/null
 q "CREATE INDEX places_geom_idx ON places USING gist (geom);" >/dev/null
 q "INSERT INTO places (geom) VALUES (ST_SetSRID(ST_MakePoint(24.94, 60.17), 4326)), (ST_SetSRID(ST_MakePoint(23.76, 61.50), 4326));" >/dev/null
 assert_eq "places within 200km of Helsinki" "1" \
   "$(q "SELECT count(*) FROM places WHERE ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(24.94, 60.17), 4326)::geography, 200000) AND ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(24.94, 60.17), 4326)::geography) < 1;")"
 
-echo "==> exercising both together (geometry column on a hypertable)"
+section "exercising both together (geometry column on a hypertable)"
 q "ALTER TABLE readings ADD COLUMN location geometry(Point, 4326);" >/dev/null
 q "UPDATE readings SET location = ST_SetSRID(ST_MakePoint(24.94, 60.17), 4326) WHERE sensor = 1;" >/dev/null
 assert_eq "geo-tagged readings" "t" "$(q "SELECT count(*) > 0 FROM readings WHERE ST_X(location) IS NOT NULL;")"
@@ -124,7 +128,7 @@ assert_eq "geo-tagged readings" "t" "$(q "SELECT count(*) > 0 FROM readings WHER
 # `timescaledb.compress` table options, add_compression_policy/add_retention_policy, a GIST
 # index on a PostGIS point, and an EWKT insert. If a future TimescaleDB drops any of it, this
 # fails here instead of in someone's Home Assistant log.
-echo "==> exercising Home Assistant LTSS compatibility (ltss / ltss-turbo DDL)"
+section "exercising Home Assistant LTSS compatibility (ltss / ltss-turbo DDL)"
 docker exec -i "$NAME" psql -X -q -o /dev/null -v ON_ERROR_STOP=1 -U smoke -d smoke <<'SQL'
 CREATE TABLE ltss (
     time TIMESTAMPTZ NOT NULL,
@@ -167,41 +171,42 @@ assert_eq "ltss time_bucket aggregation" "t"   "$(q "SELECT count(*) > 0 FROM (S
 
 # --- container plumbing ----------------------------------------------------------------------
 
-echo "==> asserting the HEALTHCHECK reports healthy"
+section "asserting the HEALTHCHECK reports healthy"
 i=0
 until [ "$(docker inspect --format '{{.State.Health.Status}}' "$NAME")" = healthy ]; do
   i=$((i + 1))
   if [ "$i" -gt 60 ]; then
-    echo "ERROR: container did not become healthy within 60s (status: $(docker inspect --format '{{.State.Health.Status}}' "$NAME"))" >&2
+    echo "${C_FAIL}ERROR:${C_OFF} container did not become healthy within 60s (status: $(docker inspect --format '{{.State.Health.Status}}' "$NAME"))" >&2
     exit 1
   fi
   sleep 1
 done
-echo "ok: healthy after ${i}s"
+echo "${C_OK}ok:${C_OFF} healthy after ${i}s"
 assert_eq "data directory stamped for the upgrade check" \
   "postgresql=${PG_MAJOR} postgis=${POSTGIS_VERSION} timescaledb=${TIMESCALEDB_VERSION}" \
   "$(docker exec "$NAME" sh -c 'cat "$PGDATA/.ppt-versions"')"
 
-echo "==> asserting a restart with the same image is a no-op for the upgrade logic"
+section "asserting a restart with the same image is a no-op for the upgrade logic"
 docker restart "$NAME" >/dev/null
 i=0
 until docker exec "$NAME" pg_isready -h 127.0.0.1 -U smoke -d smoke >/dev/null 2>&1; do
-  i=$((i + 1)); [ "$i" -le 60 ] || { echo "ERROR: server did not come back within 60s" >&2; exit 1; }
+  i=$((i + 1)); [ "$i" -le 60 ] || { echo "${C_FAIL}ERROR:${C_OFF} server did not come back within 60s" >&2; exit 1; }
   sleep 1
 done
 assert_eq "no upgrade activity on restart" "0" "$(docker logs "$NAME" 2>&1 | grep -c 'ppt: .*checking extensions' || true)"
 assert_eq "hypertable rows survive a restart" "1000" "$(q "SELECT count(*) FROM readings;")"
 
-echo "==> asserting the official image's defaults (no POSTGRES_USER / POSTGRES_DB) get both extensions"
+section "asserting the official image's defaults (no POSTGRES_USER / POSTGRES_DB) get both extensions"
 # shellcheck disable=SC2086
 docker run -d --name "$NAME-defaults" $PLATFORM_ARGS -e POSTGRES_PASSWORD="$PASSWORD" "$IMAGE" >/dev/null
 i=0
 until docker exec "$NAME-defaults" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; do
-  i=$((i + 1)); [ "$i" -le 120 ] || { echo "ERROR: default-config server did not become ready within 120s" >&2; exit 1; }
+  i=$((i + 1)); [ "$i" -le 120 ] || { echo "${C_FAIL}ERROR:${C_OFF} default-config server did not become ready within 120s" >&2; exit 1; }
   sleep 1
 done
 assert_eq "extensions in the default 'postgres' database" "postgis,postgis_topology,timescaledb" \
   "$(docker exec "$NAME-defaults" psql -X -A -t -U postgres -c "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname <> 'plpgsql';")"
 
 KEEP_LOGS=0
-echo "==> smoke test PASSED for $IMAGE${PLATFORM:+ ($PLATFORM)}"
+section_close
+echo "${C_PASS}==> smoke test PASSED for $IMAGE${PLATFORM:+ ($PLATFORM)}${C_OFF}"

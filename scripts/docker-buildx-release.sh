@@ -27,6 +27,9 @@
 #   CI_COMMIT_SHORT_SHA, CI_PIPELINE_ID; versions from build.env (resolve-versions.sh) or
 #   versions.env.
 set -eu
+# shellcheck source=scripts/output.sh
+. "$(dirname "$0")/output.sh"
+trap section_close EXIT
 
 MODE="${1:?usage: docker-buildx-release.sh local|build|publish}"
 
@@ -41,7 +44,7 @@ COMBO="${PG_VERSION}-postgis${POSTGIS_VERSION}-timescaledb${TIMESCALEDB_VERSION}
 STAGING_TAG="${STAGING_IMAGE:-}:ci-${CI_PIPELINE_ID:-local}"
 
 build() { # build [buildx args...]
-  echo "==> ${MODE}: PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION} (${DEBIAN_SUITE}${PG_IMAGE_DIGEST:+ @ ${PG_IMAGE_DIGEST}})"
+  section "${MODE}: PostgreSQL ${PG_VERSION} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION} (${DEBIAN_SUITE}${PG_IMAGE_DIGEST:+ @ ${PG_IMAGE_DIGEST}})"
   docker buildx build \
     ${BUILDER_NAME:+--builder "${BUILDER_NAME}"} \
     --build-arg PG_VERSION="${PG_VERSION}" \
@@ -62,7 +65,7 @@ case "$MODE" in
     ;;
 
   build)
-    [ -n "${STAGING_IMAGE:-}" ] || { echo "ERROR: STAGING_IMAGE is not set" >&2; exit 1; }
+    [ -n "${STAGING_IMAGE:-}" ] || { echo "${C_FAIL}ERROR:${C_OFF} STAGING_IMAGE is not set" >&2; exit 1; }
     # provenance + sbom: the pushed manifest records how and from what it was built. GitLab's
     # registry rejects the OCI-artifact form BuildKit >= 0.32 uses for them ("blob unknown to
     # registry", moby/buildkit#7007), hence the legacy form; should a registry still refuse,
@@ -70,52 +73,52 @@ case "$MODE" in
     export BUILDX_NO_DEFAULT_OCI_ARTIFACT=1
     if ! build --platform "${PLATFORMS}" --push --provenance=true --sbom=true \
         --metadata-file staging-metadata.json -t "${STAGING_TAG}"; then
-      echo "WARNING: push with provenance/SBOM attestations failed — retrying without them" >&2
+      echo "${C_WARN}WARNING:${C_OFF} push with provenance/SBOM attestations failed — retrying without them" >&2
       build --platform "${PLATFORMS}" --push --provenance=false --sbom=false \
         --metadata-file staging-metadata.json -t "${STAGING_TAG}"
     fi
     DIGEST="$(sed -n 's/.*"containerimage.digest": *"\([^"]*\)".*/\1/p' staging-metadata.json | head -n 1)"
-    [ -n "$DIGEST" ] || { echo "ERROR: no digest in staging-metadata.json" >&2; cat staging-metadata.json; exit 1; }
+    [ -n "$DIGEST" ] || { echo "${C_FAIL}ERROR:${C_OFF} no digest in staging-metadata.json" >&2; cat staging-metadata.json; exit 1; }
     {
       echo "STAGING_TAG=${STAGING_TAG}"
       echo "STAGING_REF=${STAGING_IMAGE}@${DIGEST}"
       echo "STAGING_DIGEST=${DIGEST}"
     } > staging.env
-    echo "==> pushed ${STAGING_TAG} = ${DIGEST}"
+    section "pushed ${STAGING_TAG} = ${DIGEST}"
     docker buildx imagetools inspect "${STAGING_TAG}"
     ;;
 
   publish)
     # shellcheck disable=SC1091
     [ -f staging.env ] && . ./staging.env
-    [ -n "${STAGING_REF:-}" ] || { echo "ERROR: STAGING_REF is not set (no staging.env from the build job?)" >&2; exit 1; }
-    [ -n "${REPOSITORY}" ] || { echo "ERROR: DOCKERHUB_REPOSITORY is not set" >&2; exit 1; }
-    echo "==> publishing ${STAGING_REF} as ${IMAGE}:{${COMBO},${PG_VERSION},${PG_MAJOR},latest}"
+    [ -n "${STAGING_REF:-}" ] || { echo "${C_FAIL}ERROR:${C_OFF} STAGING_REF is not set (no staging.env from the build job?)" >&2; exit 1; }
+    [ -n "${REPOSITORY}" ] || { echo "${C_FAIL}ERROR:${C_OFF} DOCKERHUB_REPOSITORY is not set" >&2; exit 1; }
+    section "publishing ${STAGING_REF} as ${IMAGE}:{${COMBO},${PG_VERSION},${PG_MAJOR},latest}"
     for tag in "${COMBO}" "${PG_VERSION}" "${PG_MAJOR}" latest; do
       docker buildx imagetools create -t "${IMAGE}:${tag}" "${STAGING_REF}"
     done
 
-    echo "==> verifying what Docker Hub now serves"
+    section "verifying what Docker Hub now serves"
     want="${STAGING_DIGEST:-${STAGING_REF##*@}}"
     for tag in "${COMBO}" "${PG_VERSION}" "${PG_MAJOR}" latest; do
       got="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:${tag}")"
       if [ "$got" != "$want" ]; then
-        echo "ERROR: ${IMAGE}:${tag} is ${got}, expected ${want}" >&2
+        echo "${C_FAIL}ERROR:${C_OFF} ${IMAGE}:${tag} is ${got}, expected ${want}" >&2
         exit 1
       fi
-      echo "ok: ${IMAGE}:${tag} = ${got}"
+      echo "${C_OK}ok:${C_OFF} ${IMAGE}:${tag} = ${got}"
     done
     platforms="$(docker buildx imagetools inspect --format '{{range .Manifest.Manifests}}{{if ne .Platform.OS "unknown"}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}{{end}}' "${IMAGE}:latest")"
     for p in $(echo "${PLATFORMS}" | tr ',' ' '); do
       case " ${platforms} " in
-        *" ${p} "*) echo "ok: ${IMAGE}:latest has ${p}" ;;
-        *) echo "ERROR: ${IMAGE}:latest lacks ${p} (has: ${platforms})" >&2; exit 1 ;;
+        *" ${p} "*) echo "${C_OK}ok:${C_OFF} ${IMAGE}:latest has ${p}" ;;
+        *) echo "${C_FAIL}ERROR:${C_OFF} ${IMAGE}:latest lacks ${p} (has: ${platforms})" >&2; exit 1 ;;
       esac
     done
     ;;
 
   *)
-    echo "ERROR: unknown mode '${MODE}' (expected local|build|publish)" >&2
+    echo "${C_FAIL}ERROR:${C_OFF} unknown mode '${MODE}' (expected local|build|publish)" >&2
     exit 1
     ;;
 esac
