@@ -15,6 +15,9 @@
 #      compressed TimescaleDB chunks and PostGIS geometries that all have to come through
 #   3. PPT_AUTO_UPGRADE=off leaves a foreign data directory alone
 #   4. an interrupted upgrade is resumed on the next start
+#   5. (newest bundled major) the container killed at every stage of a major upgrade, in both
+#      layouts; a failing pg_upgrade rolled back so the old image starts the volume again;
+#      PPT_KEEP_OLD_CLUSTER=1; two clusters in one volume refused instead of guessed
 #
 # The old-major fixtures are built from this repository's own Dockerfile (postgres:<major>
 # base, same extension versions), so the test needs the build context and versions; the
@@ -62,6 +65,7 @@ assert_eq() { # assert_eq LABEL EXPECTED ACTUAL
 
 CONTAINERS=""
 VOLUMES=""
+IMAGES=""   # fixtures built and previous images pulled by THIS run, removed at the end
 cleanup() {
   status=$?
   if [ "$status" != 0 ]; then
@@ -73,6 +77,8 @@ cleanup() {
   [ -z "$CONTAINERS" ] || docker rm -f $CONTAINERS >/dev/null 2>&1 || true
   # shellcheck disable=SC2086
   [ -z "$VOLUMES" ] || docker volume rm -f $VOLUMES >/dev/null 2>&1 || true
+  # shellcheck disable=SC2086
+  [ -z "$IMAGES" ] || docker rmi $IMAGES >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -118,10 +124,22 @@ wait_exit() {
 }
 
 stop() { docker stop "$1" >/dev/null; }   # clean shutdown, like `docker compose down`
+# kill_at CONTAINER PATTERN — SIGKILL as soon as PATTERN shows up in its log
+kill_at() {
+  _i=0
+  until docker logs "$1" 2>&1 | grep -q "$2"; do
+    if [ "$(docker inspect -f '{{.State.Running}}' "$1")" != true ]; then
+      fail "$1 exited before '$2' appeared in its log"
+    fi
+    _i=$((_i + 1)); [ "$_i" -le 3000 ] || fail "'$2' never appeared in the log of $1"
+    sleep 0.1
+  done
+  docker kill -s KILL "$1" >/dev/null
+}
 kill9() { docker kill -s KILL "$1" >/dev/null; }
 
-q() { # q CONTAINER USER DB SQL
-  docker exec "$1" psql -X -A -t -q -v ON_ERROR_STOP=1 -U "$2" -d "$3" -c "$4"
+q() { # q CONTAINER USER DB SQL — DB via PGDATABASE, so names like "a=b" are taken literally
+  docker exec -e PGDATABASE="$3" "$1" psql -X -A -t -q -v ON_ERROR_STOP=1 -U "$2" -c "$4"
 }
 
 # seed CONTAINER USER — the data set every scenario writes with the OLD image and reads back
@@ -146,8 +164,19 @@ CREATE TABLE metrics (ts timestamptz NOT NULL, v int);
 SELECT create_hypertable('metrics', 'ts');
 INSERT INTO metrics SELECT now(), 42;
 SQL
+  # Database names that break naive shell handling: whitespace, and "=" (psql -d would read
+  # that as a connection string). Both carry an extension the upgrade must update.
+  for _db in "home assistant" "a=b"; do
+    q "$_c" "$_u" postgres "CREATE DATABASE \"${_db}\"" >/dev/null
+    q "$_c" "$_u" "$_db" "CREATE EXTENSION timescaledb" >/dev/null
+  done
   q "$_c" "$_u" "$_u" "ALTER SYSTEM SET work_mem = '7MB'" >/dev/null
-  docker exec "$_c" sh -c 'echo "max_connections = 123" >> "$PGDATA/postgresql.conf"'
+  # postgresql.conf content a major upgrade must carry over intact: a quoted value with " #" in
+  # it, and an include_dir with a setting of its own.
+  docker exec -u postgres "$_c" sh -c 'echo "max_connections = 123" >> "$PGDATA/postgresql.conf"
+    echo "log_line_prefix = '"'"'%m # '"'"'   # trailing comment" >> "$PGDATA/postgresql.conf"
+    mkdir -p "$PGDATA/conf.d" && echo "statement_timeout = 42s" > "$PGDATA/conf.d/ppt-test.conf"
+    echo "include_dir '"'"'conf.d'"'"'" >> "$PGDATA/postgresql.conf"'
 }
 
 # verify CONTAINER USER — everything seed() wrote is there and both extensions are current
@@ -165,6 +194,10 @@ verify() {
   assert_eq "2nd db rows"          "42"                   "$(q "$_c" "$_u" second "SELECT v FROM metrics")"
   assert_eq "ALTER SYSTEM setting" "7MB"                  "$(q "$_c" "$_u" "$_u" "SHOW work_mem")"
   assert_eq "postgresql.conf setting" "123"               "$(q "$_c" "$_u" "$_u" "SHOW max_connections")"
+  assert_eq "quoted setting with ' #'" "%m # "            "$(q "$_c" "$_u" "$_u" "SHOW log_line_prefix")"
+  assert_eq "include_dir setting"  "42s"                  "$(q "$_c" "$_u" "$_u" "SHOW statement_timeout")"
+  assert_eq "timescaledb in 'home assistant'" "$TIMESCALEDB_VERSION" "$(q "$_c" "$_u" "home assistant" "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")"
+  assert_eq "timescaledb in 'a=b'" "$TIMESCALEDB_VERSION" "$(q "$_c" "$_u" "a=b" "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")"
   q "$_c" "$_u" "$_u" "CREATE TABLE after_upgrade (ts timestamptz NOT NULL, v int); SELECT create_hypertable('after_upgrade', 'ts'); INSERT INTO after_upgrade VALUES (now(), 1)" >/dev/null
   assert_eq "new hypertable works"  "1"                   "$(q "$_c" "$_u" "$_u" "SELECT count(*) FROM after_upgrade")"
   assert_eq "data directory stamped" "postgresql=${PG_MAJOR} postgis=${POSTGIS_VERSION} timescaledb=${TIMESCALEDB_VERSION}" \
@@ -184,6 +217,7 @@ n=0
 for prev in $PREVIOUS_IMAGES; do
   n=$((n + 1))
   log "pulling the previously published image ${prev}"
+  docker image inspect "$prev" >/dev/null 2>&1 || IMAGES="$IMAGES $prev"
   docker pull -q "$prev" >/dev/null
   prev_major="$(docker run --rm "$prev" sh -c 'echo "$PG_MAJOR"')"
   prev_desc="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.description"}}' "$prev")"
@@ -223,6 +257,7 @@ echo "majors with bundled upgrade binaries: ${UPGRADE_FROM_MAJORS:-<none>}"
 
 for major in $UPGRADE_FROM_MAJORS; do
   fixture="${FIXTURE_PREFIX}:pg${major}"
+  IMAGES="$IMAGES $fixture"
   log "building the PostgreSQL ${major} fixture ${fixture} (postgres:${major}-${DEBIAN_SUITE} + PostGIS ${POSTGIS_VERSION} + TimescaleDB ${TIMESCALEDB_VERSION})"
   docker build -q -t "$fixture" \
     --build-arg PG_VERSION="$major" \
@@ -263,6 +298,76 @@ for major in $UPGRADE_FROM_MAJORS; do
   wait_ready "$c" ha; verify "$c" ha
   assert_eq "resume was logged" "1" "$(docker logs "$c" 2>&1 | grep -c 'ppt: resuming an interrupted' || true)"
 done
+
+# --- 5. interruptions, failures, leftovers (newest bundled major only) ------------------------
+
+if [ -n "$UPGRADE_FROM_MAJORS" ]; then
+  major="${UPGRADE_FROM_MAJORS##* }"
+  fixture="${FIXTURE_PREFIX}:pg${major}"
+
+  # old_cluster LAYOUT NAME -> V (volume), MOUNT, OLDENV: a seeded PostgreSQL <major> cluster
+  #   inplace   volume at /var/lib/postgresql/data (<= 17 layout)
+  #   relocate  volume at /var/lib/postgresql, cluster in <major>/docker (18+ layout)
+  old_cluster() {
+    new_volume "$2"
+    if [ "$1" = inplace ]; then
+      MOUNT=/var/lib/postgresql/data; OLDENV="PGDATA=/var/lib/postgresql/data"
+    else
+      MOUNT=/var/lib/postgresql; OLDENV="PGDATA=/var/lib/postgresql/${major}/docker"
+    fi
+    start "$2-old" "$fixture" -v "$V:$MOUNT" -e "$OLDENV" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_USER=ha -e POSTGRES_DB=ha
+    wait_ready "$C" ha; seed "$C" ha; stop "$C"
+  }
+
+  for layout in inplace relocate; do
+    for at in 'ppt: initdb' 'carried over' 'ppt: vacuumdb'; do
+      log "scenario 5a: ${layout} layout, PostgreSQL ${major} upgrade killed at '${at}', then started again"
+      tag="k-${layout}-$(echo "$at" | tr -c 'a-z' '-')"
+      old_cluster "$layout" "$tag"; v="$V"
+      start "$tag-new" "$IMAGE" -v "$v:$MOUNT" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_USER=ha -e POSTGRES_DB=ha
+      kill_at "$C" "$at"
+      start "$tag-again" "$IMAGE" -v "$v:$MOUNT" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_USER=ha -e POSTGRES_DB=ha; c="$C"
+      wait_ready "$c" ha; verify "$c" ha
+      assert_eq "no staging or old cluster left behind" "" \
+        "$(docker exec "$c" sh -c 'ls -d /var/lib/postgresql/*/docker.ppt-* /var/lib/postgresql/data/pg[0-9]*_* /var/lib/postgresql/'"${major}"' 2>/dev/null')"
+    done
+
+    log "scenario 5b: ${layout} layout, pg_upgrade fails -> rolled back, old image starts it, fixed, upgraded"
+    tag="f-${layout}"
+    old_cluster "$layout" "$tag"; v="$V"
+    # reg* columns other than regclass/regrole/regtype make pg_upgrade's checks refuse.
+    start "$tag-block" "$fixture" -v "$v:$MOUNT" -e "$OLDENV" -e POSTGRES_PASSWORD="$PW"; c="$C"
+    wait_ready "$c" ha; q "$c" ha ha "CREATE TABLE upgrade_blocker (p regproc)" >/dev/null; stop "$c"
+    start "$tag-new" "$IMAGE" -v "$v:$MOUNT" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_USER=ha -e POSTGRES_DB=ha; c="$C"
+    assert_eq "container stops on the failed pg_upgrade" "1" "$(wait_exit "$c" 300)"
+    assert_eq "rollback was logged" "1" "$(docker logs "$c" 2>&1 | grep -c 'ppt: rolled back' || true)"
+    docker start "$c" >/dev/null
+    assert_eq "a restart fails the same way (no empty cluster)" "1" "$(wait_exit "$c" 300)"
+    start "$tag-oldagain" "$fixture" -v "$v:$MOUNT" -e "$OLDENV" -e POSTGRES_PASSWORD="$PW"; c="$C"
+    wait_ready "$c" ha
+    assert_eq "old image serves the untouched data" "500" "$(q "$c" ha ha "SELECT count(*) FROM readings")"
+    q "$c" ha ha "DROP TABLE upgrade_blocker" >/dev/null; stop "$c"
+    start "$tag-fixed" "$IMAGE" -v "$v:$MOUNT" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_USER=ha -e POSTGRES_DB=ha; c="$C"
+    wait_ready "$c" ha; verify "$c" ha
+  done
+
+  log "scenario 5c: PPT_KEEP_OLD_CLUSTER=1 keeps the old cluster under a name that is never picked up again"
+  old_cluster relocate keep; v="$V"
+  start "keep-new" "$IMAGE" -v "$v:/var/lib/postgresql" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_USER=ha -e POSTGRES_DB=ha -e PPT_KEEP_OLD_CLUSTER=1; c="$C"
+  wait_ready "$c" ha; verify "$c" ha
+  assert_eq "old cluster kept, renamed" "1" "$(docker exec "$c" sh -c "ls -d /var/lib/postgresql/${major}/docker.ppt-old-* | wc -l")"
+  restart_is_noop "$c" ha
+
+  log "scenario 5d: two clusters in one volume are refused, not guessed between"
+  old_cluster relocate two; v="$V"
+  # A second, stale cluster next to the live one, as an orphan or a hand-kept copy would be.
+  docker run --rm -v "$v:/var/lib/postgresql" --user postgres --entrypoint sh "$IMAGE" -c \
+    "mkdir -p /var/lib/postgresql/$((major - 1)) && cp -a /var/lib/postgresql/${major}/docker /var/lib/postgresql/$((major - 1))/docker"
+  start "two-new" "$IMAGE" -v "$v:/var/lib/postgresql" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_USER=ha -e POSTGRES_DB=ha; c="$C"
+  assert_eq "container refuses to start" "1" "$(wait_exit "$c")"
+  assert_eq "refusal names both directories" "1" "$(docker logs "$c" 2>&1 | grep 'more than one PostgreSQL data directory' | grep "/$((major - 1))/docker" | grep -c "/${major}/docker" || true)"
+  assert_eq "nothing was upgraded" "" "$(docker run --rm -v "$v:/var/lib/postgresql" --entrypoint sh "$IMAGE" -c "ls -d /var/lib/postgresql/${PG_MAJOR} 2>/dev/null")"
+fi
 
 # --- 3. opt-out --------------------------------------------------------------------------------
 

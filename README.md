@@ -103,12 +103,19 @@ server is opened to clients — the weekly auto-update therefore never leaves a 
   updated on the old cluster so both sides run identical versions (Timescale's requirement),
   the new cluster is initialised with the old one's encoding, locale provider, checksum setting
   and WAL segment size, `pg_hba.conf`, `pg_ident.conf`, `postgresql.auto.conf` (`ALTER SYSTEM`)
-  and `conf.d/` are carried over, every setting explicitly enabled in the old
-  `postgresql.conf` is appended to the new one (settings the new major no longer knows are
-  kept as comments; the old file stays next to it as `postgresql.conf.pg<major>`), and
-  `vacuumdb --analyze-in-stages` runs before the server opens. An interrupted upgrade is
-  resumed on the next start; a failed `pg_upgrade` leaves the old cluster untouched and
-  startable with the old image.
+  and `conf.d/` (plus any other `*.conf` file and the TLS `server.crt`/`server.key`/`root.crt`/
+  `root.crl` next to them) are carried over, every setting in the old `postgresql.conf` that
+  differs from the new one's is appended to it as the old server read it, quoting and all, along
+  with its `include` directives (settings the new major no longer knows are kept as comments;
+  the old file stays next to it as `postgresql.conf.pg<major>`), and
+  `vacuumdb --analyze-in-stages` runs before the server opens.
+* **An upgrade that is interrupted or fails** costs nothing but time. Until `pg_upgrade` has
+  succeeded, the new cluster is built in a staging directory next to the final one: a failure
+  rolls back (the old cluster is exactly where and how it was, startable with the old image,
+  and the container stops with the reason), and a `docker stop`/`kill`, an OOM kill or a host
+  reboot in the middle is simply redone on the next start. From the moment `pg_upgrade` has
+  succeeded, the new cluster is the one that counts: the next start only finishes the
+  remaining steps, the old cluster is never started again.
 * **The data directory moved** (PostgreSQL ≤ 17 images kept it at
   `/var/lib/postgresql/data`, 18+ at `/var/lib/postgresql/<major>/docker` inside a volume at
   `/var/lib/postgresql`): both are found. A volume still mounted at
@@ -116,6 +123,9 @@ server is opened to clients — the weekly auto-update therefore never leaves a 
   directory inside a `/var/lib/postgresql` volume is upgraded into the 18+ location.
 * **Downgrades** (a `:17` tag on an 18 directory) are refused with a clear message; a newer
   extension version than the image ships is left alone with a warning.
+* **More than one data directory** in a `/var/lib/postgresql` volume (an old cluster copied
+  or kept next to the live one) is refused with both paths named, rather than guessing which
+  one is current.
 
 Knobs, all environment variables:
 
@@ -123,7 +133,7 @@ Knobs, all environment variables:
 | --- | --- | --- |
 | `PPT_AUTO_UPGRADE` | `on` | `off` = behave exactly like the official image (no extension updates, no `pg_upgrade`) |
 | `PPT_UPGRADE_MODE` | `link` | `copy` = `pg_upgrade` without `--link` (twice the disk, but the old cluster stays startable with the old image) |
-| `PPT_KEEP_OLD_CLUSTER` | `0` | `1` = keep the old cluster directory after a successful major upgrade instead of deleting it |
+| `PPT_KEEP_OLD_CLUSTER` | `0` | `1` = keep the old cluster directory after a successful major upgrade instead of deleting it, renamed to `<dir>.ppt-old-<timestamp>` so it is never mistaken for a live one |
 
 Take a backup before a major upgrade anyway — `pg_upgrade --link` is a one-way street once the
 new cluster has started. What the image cannot do is upgrade from a major TimescaleDB has
@@ -134,10 +144,16 @@ upgrade it.
 All of this is tested on every build: the previously published image and the oldest published
 tag of the same major are started on a volume, seeded (hypertables with compressed chunks and
 geometries, a second database, `ALTER SYSTEM` and `postgresql.conf` settings, a custom
-superuser), and taken over by the new image — after a clean stop, after `docker kill`, and as
-an unprivileged `--user`. Then a real PostgreSQL 16 and 17 data directory (built from this
-Dockerfile on the older base image) is upgraded in both volume layouts, an interrupted upgrade
-is resumed, and `PPT_AUTO_UPGRADE=off` is checked to refuse like the official image does.
+superuser, databases named `home assistant` and `a=b`, a quoted `postgresql.conf` value with a
+`#` in it and an `include_dir`), and taken over by the new image — after a clean stop, after
+`docker kill`, and as an unprivileged `--user`. Then a real PostgreSQL 16 and 17 data directory
+(built from this Dockerfile on the older base image) is upgraded in both volume layouts; the
+newest of them is also killed at every stage of the upgrade and started again, made to fail
+`pg_upgrade` (rolled back, started with the old image, fixed, upgraded), upgraded with
+`PPT_KEEP_OLD_CLUSTER=1`, and put next to a second cluster in one volume (refused); and
+`PPT_AUTO_UPGRADE=off` is checked to refuse like the official image does. Every build also
+asserts, on every platform, that the previous PostgreSQL major is among the bundled ones, so an
+image that could not upgrade last week's `:latest` is never published.
 
 ## Building it yourself
 
