@@ -25,7 +25,7 @@ FROM postgres:${PG_VERSION}-${DEBIAN_SUITE}${PG_IMAGE_DIGEST:+@${PG_IMAGE_DIGEST
 # base image is the authority on which major it contains.
 ARG DEBIAN_SUITE=trixie
 ARG POSTGIS_VERSION=3.6.4
-ARG TIMESCALEDB_VERSION=2.30.0
+ARG TIMESCALEDB_VERSION=2.30.2
 # Oldest PostgreSQL major whose server binaries (plus PostGIS + TimescaleDB at the versions
 # above) are bundled so that a data directory of that major is pg_upgrade'd automatically on
 # start. Majors for which upstream has no TimescaleDB package at TIMESCALEDB_VERSION are
