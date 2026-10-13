@@ -48,8 +48,9 @@ This repo has no package manager. Its "dependencies" are:
    with fixes and whether a base-image refresh would close them.
 4. **Runner**: `glab api runners/51355423` → `status`, `contacted_at` (offline → memory
    `kirbodev-gitlab-runners` has the host ops).
-5. **Token expiry**: `op item get "PostgreSQL PostGIS TimescaleDB - GitLab API Token" --vault
-   Personal --fields expires` (if `op` is not signed in, ask the user to run
+5. **Token expiry**: `op item get "PostgreSQL PostGIS TimescaleDB - GitLab API Token"
+   --account my.1password.com --vault Personal --fields expires` (a unix timestamp; without
+   `--account` the default account has no `Personal` vault) (if `op` is not signed in, ask the user to run
    `! op signin` rather than guessing). < 30 days left → recommend rotating (ask before doing it).
 6. **Docker Hub matches git**: `docker buildx imagetools inspect
    docker.io/kirbownz/postgresql-postgis-timescaledb:latest` — its `org.opencontainers.image.description`
@@ -110,7 +111,7 @@ mise exec -- shellcheck -S warning scripts/*.sh init-*.sh
 mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh
 mise exec -- hadolint Dockerfile
 # resolver: Phase 2.1 again, if Phase 3 touched versions.env or the resolver
-DOCKERHUB_REPOSITORY=kirbownz/postgresql-postgis-timescaledb sh scripts/docker-buildx-release.sh local
+sh scripts/docker-buildx-release.sh local
 sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
 sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
 ```
