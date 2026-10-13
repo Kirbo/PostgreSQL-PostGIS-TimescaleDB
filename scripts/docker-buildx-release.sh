@@ -34,7 +34,8 @@ MODE="${1:?usage: docker-buildx-release.sh local|build|publish}"
 if [ -f build.env ]; then . ./build.env; else . ./versions.env; fi
 
 REGISTRY="${DOCKER_REGISTRY:-docker.io}"
-REPOSITORY="${DOCKERHUB_REPOSITORY:?DOCKERHUB_REPOSITORY is not set}"
+# Only publish needs it — `local` must work on a laptop with nothing exported.
+REPOSITORY="${DOCKERHUB_REPOSITORY:-}"
 IMAGE="${REGISTRY}/${REPOSITORY}"
 COMBO="${PG_VERSION}-postgis${POSTGIS_VERSION}-timescaledb${TIMESCALEDB_VERSION}"
 STAGING_TAG="${STAGING_IMAGE:-}:ci-${CI_PIPELINE_ID:-local}"
@@ -87,6 +88,7 @@ case "$MODE" in
     # shellcheck disable=SC1091
     [ -f staging.env ] && . ./staging.env
     [ -n "${STAGING_REF:-}" ] || { echo "ERROR: STAGING_REF is not set (no staging.env from the build job?)" >&2; exit 1; }
+    [ -n "${REPOSITORY}" ] || { echo "ERROR: DOCKERHUB_REPOSITORY is not set" >&2; exit 1; }
     echo "==> publishing ${STAGING_REF} as ${IMAGE}:{${COMBO},${PG_VERSION},${PG_MAJOR},latest}"
     for tag in "${COMBO}" "${PG_VERSION}" "${PG_MAJOR}" latest; do
       docker buildx imagetools create -t "${IMAGE}:${tag}" "${STAGING_REF}"

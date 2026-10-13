@@ -60,7 +60,7 @@ mise exec -- shellcheck -o all scripts/*.sh init-*.sh; mise exec -- shellcheck -
 mise exec -- hadolint Dockerfile
 RESOLVE_MODE_OVERRIDE=pinned sh scripts/resolve-versions.sh pinned.env   # must equal versions.env
 RESOLVE_MODE_OVERRIDE=auto   sh scripts/resolve-versions.sh auto.env     # must say RESOLVED_FROM=auto
-DOCKERHUB_REPOSITORY=kirbownz/postgresql-postgis-timescaledb sh scripts/docker-buildx-release.sh local
+sh scripts/docker-buildx-release.sh local
 sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
 sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
 sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local          # ~10 min; skip only with --quick, and say so
