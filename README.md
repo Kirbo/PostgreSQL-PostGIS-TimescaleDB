@@ -222,7 +222,7 @@ then re-tagged: the bytes that were tested are the bytes that get published.
 | test | `smoke test` (per platform) | pulls that digest and runs it (amd64 under emulation): versions, hypertable, spatial index, LTSS DDL, healthcheck, restart no-op, official defaults |
 | test | `upgrade test` | the previously published images and real PostgreSQL 16 / 17 data directories are taken over by the new image, see above |
 | test | `compose test` | `docker compose up --wait` with the bundled file comes up healthy |
-| test | `vulnerability scan` | Trivy, HIGH/CRITICAL with a fix available; informational (`allow_failure`) |
+| test | `vulnerability scan` | Trivy over the Debian packages, HIGH/CRITICAL with a fix available; informational (`allow_failure`) |
 | publish | `publish image` | `imagetools create` re-tags the tested digest onto the Docker Hub tags (default branch, or a `PUBLISH=1` manual run), then verifies every tag resolves to it with every platform |
 
 Nothing is published unless lint and every test passed, the tests on the exact digest being published.

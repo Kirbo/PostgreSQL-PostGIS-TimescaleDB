@@ -262,6 +262,12 @@ compose test:
 
 # Debian base + apt packages, rebuilt weekly: a CVE scan is cheap here. Informational — the
 # image ships regardless, the job just goes red in the pipeline view.
+#
+# OS packages only (--pkg-types os). The one non-Debian binary in the image is the base image's
+# gosu, whose Go stdlib CVEs Trivy lists by version alone: none is reachable (govulncheck
+# -mode binary: "affected by 0 vulnerabilities"; gosu only setuid()s and exec()s), and only a
+# new upstream postgres image can change it. Scanning it kept this job red on every pipeline,
+# hiding the signal it exists for. /maintain checks gosu with govulncheck instead.
 vulnerability scan:
   extends: .not_on_schedule
   stage: test
@@ -278,8 +284,9 @@ vulnerability scan:
     TRIVY_USERNAME: gitlab-ci-token
     TRIVY_PASSWORD: $CI_JOB_TOKEN
     TRIVY_NO_PROGRESS: "true"
+    TRIVY_DISABLE_VEX_NOTICE: "true"
   script:
-    - trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "${STAGING_REF}"
+    - trivy image --scanners vuln --pkg-types os --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "${STAGING_REF}"
 
 # --- publish -----------------------------------------------------------------------------
 

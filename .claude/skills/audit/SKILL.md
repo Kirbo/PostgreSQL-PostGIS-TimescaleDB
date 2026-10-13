@@ -65,6 +65,7 @@ sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
 sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
 sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local          # ~15 min; skip only with --quick, and say so
 trivy image --severity HIGH,CRITICAL --ignore-unfixed postgresql-postgis-timescaledb:local
+# gosu (Go) findings: judge them by reachability — govulncheck -mode binary, as /maintain does
 ```
 
 Plus, not run in CI:

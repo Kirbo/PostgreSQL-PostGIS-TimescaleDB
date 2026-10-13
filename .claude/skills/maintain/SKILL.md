@@ -45,7 +45,7 @@ This repo has no package manager. Its "dependencies" are:
      (`glab ci trace <job-id>` / `glab api projects/86056054/jobs/<id>/trace`).
 3. **Last `main` pipeline**: `glab api "projects/86056054/pipelines?ref=main&per_page=5"`. Read
    the `vulnerability scan` job even when green-with-warning (`allow_failure`) — count HIGH/CRITICAL
-   with fixes and whether a base-image refresh would close them.
+   with fixes in the Debian packages and whether a base-image refresh would close them.
 4. **Runner**: `glab api runners/51355423` → `status`, `contacted_at` (offline → memory
    `kirbodev-gitlab-runners` has the host ops).
 5. **Token expiry**: `op item get "PostgreSQL PostGIS TimescaleDB - GitLab API Token"
@@ -121,8 +121,19 @@ images) when the `Dockerfile`, `docker-entrypoint-ppt.sh`, `init-*.sh`, `DEBIAN_
 upgrade bound changed. Local runs cover the host arch only; amd64 is covered by CI's smoke-test
 matrix — say so in the report rather than claiming it.
 
-`trivy image --severity HIGH,CRITICAL --ignore-unfixed postgresql-postgis-timescaledb:local` —
-informational, as in CI.
+`trivy image --scanners vuln --pkg-types os --severity HIGH,CRITICAL --ignore-unfixed
+postgresql-postgis-timescaledb:local` — informational, as in CI (Debian packages only). The base
+image's `gosu` is the one Go binary; check it for REACHABLE vulnerabilities, which is what
+version-matching scanners cannot tell:
+
+```
+docker run --rm --entrypoint cat postgresql-postgis-timescaledb:local /usr/local/bin/gosu > "$TMPDIR/gosu"
+docker run --rm -v "$TMPDIR/gosu:/gosu:ro" golang:1 sh -c \
+  'go install golang.org/x/vuln/cmd/govulncheck@latest >/dev/null 2>&1 && govulncheck -mode binary /gosu'
+```
+
+"affected by 0 vulnerabilities" is the expected result; anything else is a report item (only a
+new upstream postgres image can fix it — check whether one is out).
 
 A check that fails and cannot be fixed without a redesign → stop, report the failing command, its
 output and your diagnosis. No broken commit.
