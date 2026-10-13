@@ -17,7 +17,9 @@ services:
     environment:
       - POSTGRES_DB=homeassistant
       - POSTGRES_USER=homeassistant
+      # Demo credentials: change the password before keeping any data in this.
       - POSTGRES_PASSWORD=homeassistant
+    # Every interface of the host. Drop this when the clients run in this compose project.
     ports:
       - 5432:5432
     networks:

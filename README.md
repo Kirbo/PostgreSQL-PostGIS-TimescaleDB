@@ -50,6 +50,11 @@ Or with the bundled compose file (PostgreSQL on port 5432, pgAdmin available com
 docker compose up
 ```
 
+The compose file is for trying the image out: its password is `homeassistant` and it publishes
+port 5432 on every interface of the host. Change the password before keeping any data in it, and
+drop the `ports:` mapping when the clients (Home Assistant, say) run in the same compose project
+and reach the database over its network anyway.
+
 Every environment variable of the [official image](https://hub.docker.com/_/postgres)
 (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `PGDATA`, …) works unchanged.
 
