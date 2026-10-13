@@ -5,9 +5,9 @@
 # published image corresponds to a commit, `git log` is the upgrade history, and a bump can be
 # reverted like any other change.
 #
-# Prints CHANGED=true/false (also written to versions-commit.env for the dotenv report) so the
-# scheduled pipeline knows whether to stop here (a new pipeline is on its way) or to carry on
-# and rebuild the unchanged versions for the Debian security updates.
+# Prints CHANGED=true/false (also written to versions-commit.env) for the job log. Nothing
+# consumes it: the scheduled pipeline ends here either way, and a rebuilt base image is
+# picked up as a changed PG_IMAGE_DIGEST, i.e. as a commit like any other.
 #
 # Needs VERSIONS_PUSH_TOKEN (project access token, api + write_repository, allowed to push to
 # the protected default branch) — the CI job token cannot push.

@@ -83,9 +83,8 @@ Their DDL is part of the smoke test, so the weekly auto-update cannot quietly br
 legacy positional `create_hypertable()` signature, the pre-hypercore `timescaledb.compress`
 table options with `add_compression_policy`/`add_retention_policy`, a GIST index over a PostGIS
 point column, an EWKT insert, chunk compression, and a `time_bucket()` aggregation are all
-replayed and asserted on every build. All of it still works on PostgreSQL 18 / TimescaleDB
-2.29 — the only complaint is TimescaleDB's cosmetic "use TEXT instead of VARCHAR" hint, which
-comes from LTSS's own schema.
+replayed and asserted on every build, i.e. on the versions listed above. The only complaint is
+TimescaleDB's cosmetic "use TEXT instead of VARCHAR" hint, which comes from LTSS's own schema.
 
 ### Upgrades are automatic
 
