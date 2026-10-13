@@ -220,7 +220,7 @@ then re-tagged: the bytes that were tested are the bytes that get published.
 | test | `vulnerability scan` | Trivy, HIGH/CRITICAL with a fix available; informational (`allow_failure`) |
 | publish | `publish image` | `imagetools create` re-tags the tested digest onto the Docker Hub tags (default branch, or a `PUBLISH=1` manual run), then verifies every tag resolves to it with every platform |
 
-Nothing is published unless every test passed on the exact digest being published.
+Nothing is published unless lint and every test passed, the tests on the exact digest being published.
 
 ### Required CI/CD settings
 

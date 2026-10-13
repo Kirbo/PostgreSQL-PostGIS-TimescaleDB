@@ -304,6 +304,13 @@ publish image:
       artifacts: false
     - job: compose test
       artifacts: false
+    # Lint gates the publish too: with `needs`, a red job that is not listed would not stop it.
+    - job: shellcheck
+      artifacts: false
+    - job: hadolint
+      artifacts: false
+    - job: resolver
+      artifacts: false
   before_script:
     - !reference [.docker, before_script]
     # Credentials: DOCKERHUB_USERNAME/DOCKERHUB_TOKEN, or the CI_REGISTRY_USERNAME/
