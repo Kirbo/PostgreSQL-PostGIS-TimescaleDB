@@ -87,6 +87,14 @@ assert_eq "postgis"     "$POSTGIS_VERSION"     "$(q "SELECT extversion FROM pg_e
 assert_eq "timescaledb" "$TIMESCALEDB_VERSION" "$(q "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';")"
 assert_eq "postgis_topology present" "1" "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'postgis_topology';")"
 assert_eq "template_postgis is a template" "t" "$(q "SELECT datistemplate FROM pg_database WHERE datname = 'template_postgis';")"
+# Everyone on the previous major (the :latest of last week, the day a new major is adopted)
+# must be upgradable by this image, on every platform: the Dockerfile only SKIPS an older major
+# it cannot bundle, so this is the check that stops such an image from being published.
+bundled="$(docker exec "$NAME" sh -c '. /etc/ppt-upgrade-from.env && echo "$PPT_UPGRADE_FROM_MAJORS"')"
+case " ${bundled} " in
+  *" $((PG_MAJOR - 1)) "*) echo "ok: PostgreSQL $((PG_MAJOR - 1)) is upgradable (bundled: ${bundled})" ;;
+  *) assert_eq "previous major bundled for the automatic upgrade" "$((PG_MAJOR - 1))" "${bundled:-<none>}" ;;
+esac
 
 echo "==> exercising TimescaleDB (hypertable + chunks)"
 q "CREATE TABLE readings (ts timestamptz NOT NULL, sensor int, value double precision);" >/dev/null
