@@ -19,7 +19,10 @@ Built on the official [`postgres`](https://hub.docker.com/_/postgres) image (Deb
 Both extensions are installed from their upstream apt repositories — PostGIS from
 [PGDG](https://apt.postgresql.org), TimescaleDB from
 [packagecloud](https://packagecloud.io/timescale/timescaledb) — so an image build is a package
-install rather than a source compile, on both architectures.
+install rather than a source compile, on both architectures. The build also applies Debian's
+pending updates (`apt-get upgrade`) on top of the base image, so a Debian security fix is in
+the next build even before docker-library rebuilds `postgres`; the base image's PostgreSQL
+packages are held for that step, so the PostgreSQL version stays the one listed above.
 
 ## Tags
 
@@ -202,7 +205,9 @@ corresponds to a commit of it**:
 * The base image digest is part of that: when docker-library rebuilds
   `postgres:18.6-trixie` for Debian security updates, the digest moves, the schedule commits
   it, and the image is republished — without any version number changing. The `FROM` is
-  pinned to that digest, so a build is reproducible.
+  pinned to that digest, so the PostgreSQL / PostGIS / TimescaleDB versions of a build are
+  reproducible; the other Debian packages are whatever the Debian archive's `apt-get upgrade`
+  brings at build time (fixes that land between two base image rebuilds).
 * Every pipeline that builds — a push, a merge request, a manual run — builds exactly what
   `versions.env` says. `RESOLVE_MODE=pinned` makes the schedule a no-op, i.e. freezes the
   versions until someone edits the file.

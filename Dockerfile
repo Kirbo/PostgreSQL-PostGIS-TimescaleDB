@@ -57,6 +57,21 @@ RUN <<'EOF'
 set -eux
 
 apt-get update
+
+# Apply Debian's pending (security) updates: a fix that lands in Debian between two
+# docker-library rebuilds of the base image would otherwise wait for the next one (and the
+# weekly digest bump) before the image carries it. The packages built from the base image's
+# PostgreSQL source (server, client, libpq5 — e.g. 18.6-1.pgdg13+2) are held for that: the
+# image promises the PostgreSQL version of its base, and PGDG publishing a newer minor must
+# not move it — a PostgreSQL bump goes through versions.env like every other.
+mapfile -t PG_HOLD < <(dpkg-query -W -f='${binary:Package}\t${source:Package}\n' \
+  | awk -F'\t' -v src="postgresql-${PG_MAJOR}" '$2 == src { print $1 }')
+printf '%s\n' "${PG_HOLD[@]}" | grep -qx "postgresql-${PG_MAJOR}" \
+  || { echo "ERROR: postgresql-${PG_MAJOR} is not installed in the base image" >&2; exit 1; }
+apt-mark hold "${PG_HOLD[@]}"
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+  -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
+
 apt-get install -y --no-install-recommends ca-certificates curl gnupg
 
 # TimescaleDB apt repo. PGDG is already wired up by the base image
@@ -149,6 +164,11 @@ sed -ri "s!^#?\s*(shared_preload_libraries)\s*=\s*'([^']*)'.*!\1 = 'timescaledb,
 grep -q "^shared_preload_libraries = 'timescaledb" /usr/share/postgresql/postgresql.conf.sample
 
 apt-get purge -y --auto-remove curl gnupg
+# The holds existed for this build only; the base image ships none, so neither does this one.
+# Prove they did their job first.
+[ "$(dpkg-query -W -f='${Version}' "postgresql-${PG_MAJOR}")" = "${PG_VERSION}" ] \
+  || { echo "ERROR: postgresql-${PG_MAJOR} moved away from the base image's ${PG_VERSION}" >&2; exit 1; }
+apt-mark unhold "${PG_HOLD[@]}"
 rm -rf /var/lib/apt/lists/*
 EOF
 
