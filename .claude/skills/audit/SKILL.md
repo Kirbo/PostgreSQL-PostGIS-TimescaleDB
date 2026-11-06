@@ -54,16 +54,18 @@ container that will not start after an automatic update. Review at that stake.
 Run all of them regardless of failures; capture output verbatim. No fixes.
 
 ```
-mise exec -- shellcheck -S warning scripts/*.sh init-*.sh
-mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh
-mise exec -- shellcheck -o all scripts/*.sh init-*.sh; mise exec -- shellcheck -o all -s bash docker-entrypoint-ppt.sh   # NIT-level only
-mise exec -- hadolint Dockerfile
+mise exec -- shellcheck -S warning scripts/*.sh init-*.sh tests/run.sh
+mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh scripts/output.sh tests/lib.sh tests/smoke.sh tests/compose.sh tests/upgrade.sh
+mise exec -- shellcheck -o all scripts/*.sh init-*.sh; mise exec -- shellcheck -o all -s bash docker-entrypoint-ppt.sh tests/lib.sh   # NIT-level only
+mise exec -- hadolint Dockerfile tests/Dockerfile
 RESOLVE_MODE_OVERRIDE=pinned sh scripts/resolve-versions.sh pinned.env   # must equal versions.env
 RESOLVE_MODE_OVERRIDE=auto   sh scripts/resolve-versions.sh auto.env     # must say RESOLVED_FROM=auto
 sh scripts/docker-buildx-release.sh local
-sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
-sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
-sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local          # ~15 min; skip only with --quick, and say so
+# The test suites are BuildKit build stages (tests/Dockerfile); the default Docker Desktop builder
+# sees the local image. Every step must report "ran and passed" with this run's token.
+sh scripts/buildkit-test.sh smoke docker-image://postgresql-postgis-timescaledb:local
+sh scripts/buildkit-test.sh compose docker-image://postgresql-postgis-timescaledb:local
+sh scripts/buildkit-test.sh upgrade docker-image://postgresql-postgis-timescaledb:local   # ~15 min; skip only with --quick, and say so
 trivy image --severity HIGH,CRITICAL --ignore-unfixed postgresql-postgis-timescaledb:local
 # gosu (Go) findings: judge them by reachability — govulncheck -mode binary, as /maintain does
 ```
@@ -86,8 +88,8 @@ Plus, not run in CI:
 | Image build | `Dockerfile` | build args, PGDG + packagecloud repos, packagecloud GPG key (fetched at build) |
 | Version resolution | `scripts/resolve-versions.sh` | Docker Hub API, PGDG + packagecloud `Packages` indexes (parsed with sed/awk) |
 | Auto-commit to `main` | `scripts/commit-versions.sh`, `check upstream versions` job | resolver output, `VERSIONS_PUSH_TOKEN` |
-| Build → stage → publish | `.gitlab-ci.yml`, `scripts/docker-buildx-release.sh` | CI rules, staging registry, Docker Hub creds, floating CI images |
-| Tests | `scripts/smoke-test.sh`, `upgrade-test.sh`, `compose-test.sh` | — (they are the safety net; audit what they do NOT cover) |
+| Build → stage → publish | `.gitlab-ci.yml`, `scripts/docker-buildx-release.sh` | CI rules, `$MAC_DOCKER` runner routing, BuildKit server + client certificates, staging registry, Docker Hub creds, pinned CI images |
+| Tests | `tests/Dockerfile` (stages), `tests/docker-bake.hcl`, `tests/*.sh`, `scripts/buildkit-test.sh` | — (they are the safety net; audit what they do NOT cover, and that a cached step can never pass) |
 | Secret tooling | `scripts/rotate-gitlab-pat.sh`, `gitlab-set-ci-var.sh`, `op-ensure-signin.sh` | 1Password, GitLab API |
 | User-facing contract | `README.md`, `docker-compose.yml` | — |
 
@@ -135,8 +137,9 @@ Work every item by reading the actual code. The list is a floor — flag unliste
       `5432` on all interfaces — is that clearly labelled as a demo in the README?
 - [ ] Supply chain: base image pinned by digest; apt packages pinned to exact versions; the
       packagecloud GPG key is fetched over HTTPS at build time **without fingerprint pinning**
-      (assess); CI job images on floating tags (`latest`, `stable`, `alpine:3`, `docker:cli`) in jobs
-      that hold `DOCKERHUB_TOKEN` / `VERSIONS_PUSH_TOKEN`.
+      (assess); every CI job image pinned by version + digest (a tag alone can be re-pointed),
+      above all in jobs that hold `DOCKERHUB_TOKEN` / `VERSIONS_PUSH_TOKEN` / the protected
+      BuildKit client certificate; the `apk add` in jobs (unpinned packages) — which jobs, which secrets.
 - [ ] Secrets: `VERSIONS_PUSH_TOKEN` in the `git push` URL (could it reach the log on failure?),
       masked + protected flags, which branches/triggers can read each secret, `PUBLISH` manual runs
       from non-default branches. Rotation scripts keep secrets off argv (`ps`-safe) as they claim.
@@ -161,8 +164,15 @@ Work every item by reading the actual code. The list is a floor — flag unliste
       on **the same digest**; check `needs:`, `rules:`, `allow_failure`, `interruptible`.
 - [ ] Tag order and moving tags (`latest`, `<major>`, `<version>`) — can a publish from an older
       commit (re-run, manual `PUBLISH`) move `latest` backwards?
-- [ ] Builder/container/image cleanup in `after_script` on every path; unique names across
-      parallel jobs on the shared Docker Desktop daemon.
+- [ ] No job gets a Docker engine: no `/var/run/docker.sock`, `DOCKER_HOST`, Docker-in-Docker,
+      `--driver docker-container` or `docker run`; builds/tests use the remote BuildKit builder,
+      the protected server (and its protected client certificate) only on protected refs; every
+      job's tag is `$MAC_DOCKER`, `macos-protected` on the default branch.
+- [ ] Every test step consumes `PPT_TEST_RUN`, is in its bake target's `no-cache-filter`, and has
+      its result checked by `scripts/buildkit-test.sh` (a step added to `tests/Dockerfile` but not
+      to the expected list — or vice versa — must fail).
+- [ ] The remote builder is removed in `after_script`; test steps run `--network=none` (the
+      BuildKit servers' default RUN network is the host's, shared by every build).
 
 ### 5. Tests (absent coverage on a data path is a MAJOR finding, not a nit)
 - [ ] For each Phase 3.1 state/branch, name the test that exercises it, or record that none does.
@@ -187,8 +197,8 @@ CONFIRMED / DOWNGRADE / FALSE POSITIVE. A fresh agent, not you re-checking: the 
 on its own conclusion. Fold each **Residual** back into the pool and verify those too.
 
 Verify the rest yourself by re-reading the full path. Where cheap, **prove it**: a reproduction
-built from the existing test harness (a throwaway volume + `docker run`, like `upgrade-test.sh`
-does) that fails now and would pass after the fix. Drop what you cannot stand behind. Eight real
+built from the existing test harness (a test step in `tests/Dockerfile` using `tests/lib.sh`'s
+containers and seeded volumes, like `tests/upgrade.sh` does) that fails now and would pass after the fix. Drop what you cannot stand behind. Eight real
 findings beat forty the user has to triage.
 
 Severity:
@@ -224,9 +234,10 @@ Critical → `PushNotification`.
 
 Zero findings → Phase 7. Otherwise present a fix plan with Critical/High/Medium pre-marked, Low and
 Quality listed unmarked, and **wait for explicit approval** (`--fix` pre-approves Critical/High
-only). For each approved fix: add or extend a test in `scripts/*-test.sh` that fails before and
-passes after where the finding is on a data path, make the fix, re-run the Phase 1 commands
-relevant to the changed files (`upgrade-test.sh` for any entrypoint/Dockerfile change). Still
+only). For each approved fix: add or extend a test in `tests/*.sh` (+ its stage in
+`tests/Dockerfile` and its name in `scripts/buildkit-test.sh`) that fails before and passes after
+where the finding is on a data path, make the fix, re-run the Phase 1 commands relevant to the
+changed files (the upgrade suite for any entrypoint/Dockerfile change). Still
 failing → stop and report; don't loop.
 
 Commit approved fixes one logical change per commit (Conventional Commits, `Co-Authored-By`

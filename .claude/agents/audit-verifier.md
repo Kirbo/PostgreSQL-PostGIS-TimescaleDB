@@ -37,13 +37,13 @@ false positive is as valuable as confirming a real defect.
 3. Hunt for the guard they may have missed: a check in the official entrypoint the script sources,
    an earlier `die`, the stamp-file short-circuit, the `listen_addresses=''` socket-only temp server,
    a `PPT_AUTO_UPGRADE=off` escape hatch, a CI `rules:` clause or protected variable that makes the
-   path unreachable, a test in `scripts/smoke-test.sh` / `scripts/upgrade-test.sh` that already
-   covers the case.
+   path unreachable, a test in `tests/smoke.sh` / `tests/upgrade.sh` (stages in `tests/Dockerfile`)
+   that already covers the case.
 4. Check the precondition is reachable for a real user: a volume layout, `--user`, env var or
    upstream state someone would actually have. A defect that needs the user to already be root on
    the host, or an upstream repo to be compromised, is a different severity — say which.
 5. Where a read-only probe settles it, do it: read an existing test, `docker run --rm <local image>
-   cat <file>`, `docker buildx imagetools inspect`, `git log -p -- <file>`. Never start a container
+   cat <file>` (on a developer machine; CI has no Docker engine), `docker buildx imagetools inspect`, `git log -p -- <file>`. Never start a container
    on a user's volume, never push, never call a mutating API, never touch any remote host beyond
    read-only fetches of public registry/apt metadata.
 

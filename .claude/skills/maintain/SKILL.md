@@ -18,7 +18,8 @@ This repo has no package manager. Its "dependencies" are:
 | Resolver search bounds | `versions.env` `MIN_PG_MAJOR` / `MAX_PG_MAJOR` / `DEBIAN_SUITE` / `PLATFORMS` | you |
 | Bare-`docker build` defaults | `Dockerfile` `ARG PG_VERSION` / `POSTGIS_VERSION` / `TIMESCALEDB_VERSION` / `MIN_UPGRADE_FROM_MAJOR` | you (nothing syncs them) |
 | Local lint toolchain | `mise.toml` `[tools]` (shellcheck, hadolint) | you |
-| CI job images | `.gitlab-ci.yml` (`docker:cli`, `alpine:3`, `koalaman/shellcheck-alpine:stable`, `hadolint/hadolint:latest-alpine`, `aquasec/trivy:latest`) | floating tags — you check they still work |
+| CI job images | `.gitlab-ci.yml` (`docker:<ver>-cli`, `alpine:<ver>`, `koalaman/shellcheck-alpine:v<ver>`, `hadolint/hadolint:v<ver>-alpine`, `aquasec/trivy:<ver>`), each **`tag@sha256:digest`** | you — a release at least **7 days old**, never a floating tag (Phase 3.2) |
+| BuildKit client certificates | CI/CD **File** variables `BUILDKIT_CA/CERT/KEY` (branch server) + `BUILDKIT_PROTECTED_CA/CERT/KEY` (protected), from 1Password "Kirbo Mini BuildKit branch mTLS" / "Kirbo Mini BuildKit protected mTLS" | the owner — they expire **2029-02-08** (CAs 2036-11-03); rotation: "Rotating the certificates" in `~/Documents/Claude/GitLab/BuildKit.md` (the Mac setup notes) |
 | TimescaleDB apt signing key | fetched in the `Dockerfile` from packagecloud | upstream — you check it has not expired/rotated |
 | `VERSIONS_PUSH_TOKEN` | 1Password item + CI variable | `mise run gitlab:rotate-pat` |
 
@@ -32,6 +33,21 @@ This repo has no package manager. Its "dependencies" are:
   `postgresql-postgis-timescaledb-autoupdate`).
 - The schedule pushes to `main` on its own: `git pull --ff-only` before starting and before
   committing.
+- **CI never gets a Docker engine.** No `/var/run/docker.sock`, no `DOCKER_HOST`, no
+  Docker-in-Docker, no `--driver docker-container`, no `docker run` / `docker pull` /
+  `docker compose up` in a job: images are built AND tested on the Mac's BuildKit servers through
+  a buildx `remote` builder (`.buildkit` in `.gitlab-ci.yml`: the protected server `:12340` with
+  the `BUILDKIT_PROTECTED_*` certificate on protected refs, the branch server `:12341` with
+  `BUILDKIT_*` otherwise); registry work is `docker buildx imagetools` / `trivy --image-src
+  remote`. A fix that "needs" the engine is redesigned, not given the socket back.
+- **Runner routing is `$MAC_DOCKER`**: `default: tags: [$MAC_DOCKER]`, `macos` by default,
+  `macos-protected` from the workflow rule of the default branch (its push, web and schedule
+  pipelines — they hold the Docker Hub and repo-write tokens). A job never names `macos` itself.
+- **The tests are build stages, and must never pass from the cache.** Every test step in
+  `tests/Dockerfile` consumes `ARG PPT_TEST_RUN`, its stage is in the bake target's
+  `no-cache-filter` (`tests/docker-bake.hcl`), and it writes `PASS <token>` that
+  `scripts/buildkit-test.sh` checks against its expected step list. A new step or stage gets all
+  three, or the suite fails (by design). Steps run `--network=none` and one PostgreSQL at a time.
 
 ## Phase 1 — Survey (read-only)
 
@@ -46,12 +62,22 @@ This repo has no package manager. Its "dependencies" are:
 3. **Last `main` pipeline**: `glab api "projects/86056054/pipelines?ref=main&per_page=5"`. Read
    the `vulnerability scan` job even when green-with-warning (`allow_failure`) — count HIGH/CRITICAL
    with fixes in the Debian packages and whether a base-image refresh would close them.
-4. **Runner**: `glab api runners/51355423` → `status`, `contacted_at` (offline → memory
-   `kirbodev-gitlab-runners` has the host ops).
+4. **Runners**: `glab api runners/51355423` ("Kirbo Mini", tag `macos`) and `glab api
+   runners/58628941` ("Kirbo Mini Protected", tag `macos-protected`, ref-protected) → `status`,
+   `contacted_at`; both must be assigned to the project (`glab api
+   "projects/86056054/runners?type=project_type"` or the project's runner list). Offline → memory
+   `kirbodev-gitlab-runners` has the host ops; the Mac setup (BuildKit servers, runner config) is
+   `~/Documents/Claude/GitLab/BuildKit.md`. A green default-branch pipeline whose jobs ran on
+   `macos` (not `macos-protected`) means the `MAC_DOCKER` workflow rule broke.
 5. **Token expiry**: `op item get "PostgreSQL PostGIS TimescaleDB - GitLab API Token"
    --account my.1password.com --vault Personal --fields expires` (a unix timestamp; without
    `--account` the default account has no `Personal` vault) (if `op` is not signed in, ask the user to run
    `! op signin` rather than guessing). < 30 days left → recommend rotating (ask before doing it).
+   **BuildKit client certificates**: expire 2029-02-08 (`op item get "Kirbo Mini BuildKit protected
+   mTLS" --account my.1password.com --vault Personal --fields client.pem | openssl x509 -noout
+   -enddate`, same for the branch item — a certificate, not a secret). < 90 days left → report it;
+   the rotation is the owner's (new pair from the CA, the Mac's server files, both projects' File
+   variables).
 6. **Docker Hub matches git**: `docker buildx imagetools inspect
    docker.io/kirbownz/postgresql-postgis-timescaledb:latest` — its `org.opencontainers.image.description`
    / tag set should be what `versions.env` says. A mismatch means the last publish failed.
@@ -90,10 +116,17 @@ This repo has no package manager. Its "dependencies" are:
 
 1. **mise tools**: `mise outdated` / `mise latest shellcheck` / `mise latest hadolint`; bump
    `mise.toml` to the latest stable, `mise install`.
-2. **CI images**: confirm each floating tag in `.gitlab-ci.yml` still exists and still contains the
-   tool the job calls (`docker run --rm <image> <tool> --version`). Report the versions CI currently
-   gets next to the mise pins — a shellcheck/hadolint newer in CI than locally is how "green locally,
-   red in CI" happens; bump mise to match.
+2. **CI images** — every `image:` in `.gitlab-ci.yml` is `name:<version>@sha256:<digest>`. For each,
+   find the newest release (Docker Hub tags API, `?ordering=last_updated`) that is **at least 7 days
+   old** (a fresh release has had no time to be pulled back or fixed); never a moving tag (`latest`,
+   `stable`, `alpine:3`, `docker:cli`). Bump the tag and its digest together:
+   `docker buildx imagetools inspect <name>:<version> --format '{{json .Manifest.Digest}}'` (the
+   index digest, so every platform stays covered). Check the image still has what the job calls
+   (`docker run --rm <image> <tool> --version`; for the `docker:<ver>-cli` image: `docker buildx
+   version` and `docker compose version`; buildx must still speak the BuildKit servers' version).
+   Keep mise's shellcheck / hadolint equal to the CI images' versions — a newer one in CI is how
+   "green locally, red in CI" happens. Don't touch the BuildKit server image (`moby/buildkit`, the
+   Mac's — the owner's setup), but report when it is older than the newest release ≥ 7 days old.
 3. **Dockerfile ARG defaults** → set `PG_VERSION` / `POSTGIS_VERSION` / `TIMESCALEDB_VERSION` to
    the values in `versions.env` (CI always overrides them; they only matter for the README's bare
    `docker build .`, which must build something current). Same for `DEBIAN_SUITE`.
@@ -107,19 +140,26 @@ This repo has no package manager. Its "dependencies" are:
 Run all of these; Docker must be running.
 
 ```
-mise exec -- shellcheck -S warning scripts/*.sh init-*.sh
-mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh
-mise exec -- hadolint Dockerfile
+mise exec -- shellcheck -S warning scripts/*.sh init-*.sh tests/run.sh
+mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh scripts/output.sh tests/lib.sh tests/smoke.sh tests/compose.sh tests/upgrade.sh
+mise exec -- hadolint Dockerfile tests/Dockerfile
+glab ci lint .gitlab-ci.yml
 # resolver: Phase 2.1 again, if Phase 3 touched versions.env or the resolver
 sh scripts/docker-buildx-release.sh local
-sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
-sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
+# The suites are BuildKit build stages (tests/Dockerfile); Docker Desktop's default builder sees
+# the local image. Each must end with every step "ran and passed" under this run's token.
+sh scripts/buildkit-test.sh smoke docker-image://postgresql-postgis-timescaledb:local
+sh scripts/buildkit-test.sh compose docker-image://postgresql-postgis-timescaledb:local   # needs jq
 ```
 
-Run `sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local` (~15 min, pulls old
-images) when the `Dockerfile`, `docker-entrypoint-ppt.sh`, `init-*.sh`, `DEBIAN_SUITE` or any
-upgrade bound changed. Local runs cover the host arch only; amd64 is covered by CI's smoke-test
-matrix — say so in the report rather than claiming it.
+Run `sh scripts/buildkit-test.sh upgrade docker-image://postgresql-postgis-timescaledb:local`
+(~15 min, pulls the published images, builds the older-major fixtures) when the `Dockerfile`,
+`docker-entrypoint-ppt.sh`, `init-*.sh`, `tests/`, `DEBIAN_SUITE` or any upgrade bound changed.
+Local runs cover the host arch only (`PLATFORM=linux/amd64` runs the smoke suite under emulation,
+slowly); amd64 is otherwise covered by CI's smoke-test matrix — say so in the report rather than
+claiming it. A changed CI job image or buildx: also prove the cache-bust — run a suite twice;
+the second run's test steps must execute again (no `CACHED` on them, a new token in
+`test-results/`).
 
 `trivy image --scanners vuln --pkg-types os --severity HIGH,CRITICAL --ignore-unfixed
 postgresql-postgis-timescaledb:local` — informational, as in CI (Debian packages only). The base
@@ -148,7 +188,10 @@ $LAST..HEAD -- . ':!versions.env'`. Verify every claim in `README.md` against th
   writing", "TimescaleDB 2.29") — reword to not go stale, or update;
 - the knobs table vs the `PPT_*` variables `docker-entrypoint-ppt.sh` actually reads;
 - the pipeline table vs the jobs in `.gitlab-ci.yml`; the CI/CD settings table vs the variables the
-  jobs actually require;
+  jobs actually require (incl. the six `BUILDKIT_*` File variables and the protected runner);
+- the test stages in `tests/Dockerfile` ⇄ the expected step lists in `scripts/buildkit-test.sh`
+  ⇄ the `no-cache-filter` lists in `tests/docker-bake.hcl`; the README "Tests" fidelity notes ⇄
+  what `tests/lib.sh` actually emulates;
 - the "Developing" commands still run as written (copy-paste them — Phase 4 did);
 - the long header comments in `.gitlab-ci.yml`, `Dockerfile`, `versions.env` and the scripts
   describe what the code does today.
@@ -163,7 +206,8 @@ API change the resolver had to absorb, a CI image that broke, a key rotation). N
 ## Phase 6 — Report, then commit
 
 Report to the user:
-1. **Health** — schedule / last pipelines / runner / token expiry / Docker Hub vs git, one line each.
+1. **Health** — schedule / last pipelines / both runners + routing / token expiry / BuildKit
+   certificate expiry / Docker Hub vs git, one line each.
 2. **Changes** — every pin from → to; anything skipped, with the reason.
 3. **Upstream watch items** — next PostgreSQL major ETA vs extension support, Debian suite, key
    expiry, open BuildKit workaround, Trivy counts.
@@ -173,6 +217,7 @@ Report to the user:
    token, suite move).
 
 Then `git pull --ff-only` and commit in logical units (Conventional Commits, `Co-Authored-By`
-trailer): tooling pins (`chore(tooling): …`), CI changes (`ci: …`), Dockerfile defaults/bounds
+trailer): tooling pins (`chore(tooling): …`), CI changes and CI image pins (`ci: …`), test changes
+(`test: …`), Dockerfile defaults/bounds
 (`chore: …`), resolver/script fixes (`fix(…): …`), docs (`docs: …`). Leave `versions.env`
 version pins to the schedule. **Never push** — the user pushes, and a push to `main` publishes.
