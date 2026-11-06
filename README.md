@@ -151,20 +151,22 @@ tag of the same major are started on a volume, seeded (hypertables with compress
 geometries, a second database, `ALTER SYSTEM` and `postgresql.conf` settings, a custom
 superuser, databases named `home assistant` and `a=b`, a quoted `postgresql.conf` value with a
 `#` in it and an `include_dir`), and taken over by the new image — after a clean stop, after
-`docker kill`, and as an unprivileged `--user`. Then a real PostgreSQL 16 and 17 data directory
+a kill, and as an unprivileged `--user`. Then a real PostgreSQL 16 and 17 data directory
 (built from this Dockerfile on the older base image) is upgraded in both volume layouts; the
 newest of them is also killed at every stage of the upgrade and started again, made to fail
 `pg_upgrade` (rolled back, started with the old image, fixed, upgraded), upgraded with
 `PPT_KEEP_OLD_CLUSTER=1`, and put next to a second cluster in one volume (refused); and
 `PPT_AUTO_UPGRADE=off` is checked to refuse like the official image does. Every build also
 asserts, on every platform, that the previous PostgreSQL major is among the bundled ones, so an
-image that could not upgrade last week's `:latest` is never published.
+image that could not upgrade last week's `:latest` is never published. (How the tests run
+without a Docker engine: [Tests](#tests).)
 
 ## Building it yourself
 
 ```bash
 docker build -t postgresql-postgis-timescaledb .            # versions default to the Dockerfile's ARGs
-sh scripts/smoke-test.sh postgresql-postgis-timescaledb     # start it and assert it works
+# start it and assert it works (Docker Desktop's default builder sees local images)
+sh scripts/buildkit-test.sh smoke docker-image://postgresql-postgis-timescaledb
 ```
 
 Every version is a build arg, so any combination the apt repos still carry can be built:
@@ -210,22 +212,57 @@ The pins in `versions.env` are also the floor/ceiling for the search: `MIN_PG_MA
 
 ## Pipeline
 
-Runs on the self-hosted "Kirbo Mini" runner (`macos` tag, docker executor). One build, tested,
-then re-tagged: the bytes that were tested are the bytes that get published.
+Runs on the self-hosted "Kirbo Mini" Mac Mini: every job takes the runner tag in `$MAC_DOCKER`
+— `macos-protected` (a ref-protected Docker runner with its own cache) for pipelines of the
+default branch, which hold the Docker Hub and repository-write tokens, and the shared `macos`
+Docker runner for branches and merge requests. No job gets a Docker engine (no socket, no
+Docker-in-Docker, no privileged mode): builds and tests go to a BuildKit server on the Mac over
+mutual TLS — the protected one for protected refs, the branch one otherwise — and registry work
+talks to the registries directly. One build, tested, then re-tagged: the bytes that were tested
+are the bytes that get published.
 
 | Stage | Job | What it does |
 | --- | --- | --- |
 | resolve | `resolve versions` | `build.env` = the pins in `versions.env` |
 | resolve | `check upstream versions` | **schedule only, and the schedule's only job**: resolves upstream's newest, commits `versions.env` + README when something moved; that commit's pipeline does the rest |
 | lint | `shellcheck`, `hadolint`, `resolver` | scripts and Dockerfile lint; the resolver must reproduce `versions.env` in pinned mode and find something at least as new in auto mode |
-| build | `build image` | one `buildx` build for every platform, pushed to the project's GitLab container registry as `:ci-<pipeline>`; the digest goes downstream |
-| test | `smoke test` (per platform) | pulls that digest and runs it (amd64 under emulation): versions, hypertable, spatial index, LTSS DDL, healthcheck, restart no-op, official defaults |
+| build | `build image` | one `buildx` build for every platform on the BuildKit server, pushed to the project's GitLab container registry as `:ci-<pipeline>`; the digest goes downstream |
+| test | `smoke test` (per platform) | build stages FROM that digest start it and check it (amd64 under emulation): versions, hypertable, spatial index, LTSS DDL, healthcheck, restart no-op, official defaults |
 | test | `upgrade test` | the previously published images and real PostgreSQL 16 / 17 data directories are taken over by the new image, see above |
-| test | `compose test` | `docker compose up --wait` with the bundled file comes up healthy |
-| test | `vulnerability scan` | Trivy over the Debian packages, HIGH/CRITICAL with a fix available; informational (`allow_failure`) |
+| test | `compose test` | `docker compose config` validates the bundled file; its service (environment, volume, the image's healthcheck) comes up healthy in a build stage |
+| test | `vulnerability scan` | Trivy over the Debian packages of the staging image, read from the registry, HIGH/CRITICAL with a fix available; informational (`allow_failure`) |
 | publish | `publish image` | `imagetools create` re-tags the tested digest onto the Docker Hub tags (default branch, or a `PUBLISH=1` manual run), then verifies every tag resolves to it with every platform |
 
 Nothing is published unless lint and every test passed, the tests on the exact digest being published.
+
+### Tests
+
+The tests are BuildKit build stages ([`tests/Dockerfile`](tests/Dockerfile), driven by
+[`scripts/buildkit-test.sh`](scripts/buildkit-test.sh) through
+[`tests/docker-bake.hcl`](tests/docker-bake.hcl)) built FROM the staging digest — there is no
+`docker run` anywhere. Each test step is a `RUN` that starts the image's own entrypoint in the
+background (the real startup path: `docker-entrypoint-ppt.sh`, the official entrypoint, the
+initdb scripts), waits for it with bounded `pg_isready` / `psql` polling, asserts, and stops it
+with the image's stop signal; a "volume" is the step's read-write bind mount, a real mount point
+seeded from an earlier stage. The upgrade test chains stages across images — seed with the old
+image, upgrade with the new one, back to the old one — and runs one PostgreSQL server at a time
+(the BuildKit server's memory cap is shared by every build on it). The older-major fixtures are bake targets
+built from this repository's `Dockerfile` on the older `postgres` base image.
+[`tests/lib.sh`](tests/lib.sh) has the details, including what a step does instead of `docker
+stop`, `docker kill`, `docker logs` and the HEALTHCHECK.
+
+BuildKit would serve an unchanged test step from its cache and "pass" without running it. So
+every test step consumes a token unique to the run (`PPT_TEST_RUN`) and is in its target's
+`no-cache-filter`, writes `PASS <token>` to its result file, and `buildkit-test.sh` fails the
+job if any step's result is missing or carries another token. The result files are the jobs'
+`test-results/` artifacts.
+
+Fidelity notes — what a build stage cannot reproduce exactly: the test steps run with
+`--network=none` (a private loopback, since the BuildKit servers run steps on the host network),
+so there is no IPv6 loopback and `pg_isready -h localhost` waits out `::1` before `127.0.0.1`;
+the HEALTHCHECK is the Dockerfile's `CMD`, run like Docker does (without Docker's timeout and
+retry bookkeeping); a container's processes are not PID 1; the compose test reproduces the
+service's environment and volume, not Docker networking or port publishing.
 
 ### Required CI/CD settings
 
@@ -235,6 +272,9 @@ Nothing is published unless lint and every test passed, the tests on the exact d
 | `DOCKERHUB_USERNAME` | publishing | Docker Hub account |
 | `DOCKERHUB_TOKEN` | publishing | Docker Hub access token, **masked** + protected |
 | `VERSIONS_PUSH_TOKEN` | the weekly schedule | project access token, `api` + `write_repository`, Maintainer, allowed to push to the protected default branch; the schedule fails without it |
+| `BUILDKIT_CA`, `BUILDKIT_CERT`, `BUILDKIT_KEY` | build + tests on branches / MRs | **File** variables: the Mac's branch BuildKit server CA and client certificate + key (1Password "Kirbo Mini BuildKit branch mTLS"); not protected |
+| `BUILDKIT_PROTECTED_CA`, `BUILDKIT_PROTECTED_CERT`, `BUILDKIT_PROTECTED_KEY` | build + tests on the default branch | **File** variables, **protected**: the protected BuildKit server's (1Password "Kirbo Mini BuildKit protected mTLS"); the client certificates expire 2029-02-08 |
+| "Kirbo Mini Protected" runner | default-branch pipelines | the ref-protected `macos-protected` Docker runner, assigned to the project |
 
 `CI_REGISTRY_USERNAME` / `CI_REGISTRY_PASSWORD` are accepted as aliases for the Docker Hub
 credentials, to match the other KirboDev image repositories.
@@ -250,11 +290,14 @@ KirboDev repositories carry, so one command per project keeps every token curren
 ```bash
 mise install                                                 # shellcheck + hadolint, pinned
 sh scripts/docker-buildx-release.sh local                    # builds postgresql-postgis-timescaledb:local
-sh scripts/smoke-test.sh postgresql-postgis-timescaledb:local
-sh scripts/upgrade-test.sh postgresql-postgis-timescaledb:local   # ~15 min, pulls old images
-sh scripts/compose-test.sh postgresql-postgis-timescaledb:local
-mise exec -- shellcheck -S warning scripts/*.sh init-*.sh && mise exec -- shellcheck -s bash docker-entrypoint-ppt.sh
-mise exec -- hadolint Dockerfile
+# The test suites, on the current buildx builder (Docker Desktop's default one sees local images;
+# any other takes the image as oci-layout://DIR@sha256:...):
+sh scripts/buildkit-test.sh smoke docker-image://postgresql-postgis-timescaledb:local
+sh scripts/buildkit-test.sh upgrade docker-image://postgresql-postgis-timescaledb:local   # ~15 min
+sh scripts/buildkit-test.sh compose docker-image://postgresql-postgis-timescaledb:local  # needs jq
+mise exec -- shellcheck -S warning scripts/*.sh init-*.sh tests/run.sh
+mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh scripts/output.sh tests/lib.sh tests/smoke.sh tests/compose.sh tests/upgrade.sh
+mise exec -- hadolint Dockerfile tests/Dockerfile
 ```
 
 ---
