@@ -230,7 +230,7 @@ are the bytes that get published.
 | --- | --- | --- |
 | resolve | `resolve versions` | `build.env` = the pins in `versions.env` |
 | resolve | `check upstream versions` | **schedule only, and the schedule's only job**: resolves upstream's newest, commits `versions.env` + README when something moved; that commit's pipeline does the rest |
-| lint | `shellcheck`, `hadolint`, `resolver` | scripts and Dockerfile lint; the resolver must reproduce `versions.env` in pinned mode and find something at least as new in auto mode |
+| lint | `shellcheck`, `hadolint`, `mise lock`, `resolver` | scripts and Dockerfile lint; `mise.lock` must cover every pin in `mise.toml`; the resolver must reproduce `versions.env` in pinned mode and find something at least as new in auto mode |
 | build | `build image` | one `buildx` build for every platform on the BuildKit server, pushed to the project's GitLab container registry as `:ci-<pipeline>`; the digest goes downstream |
 | test | `smoke test` (per platform) | build stages FROM that digest start it and check it (amd64 under emulation): versions, hypertable, spatial index, LTSS DDL, healthcheck, restart no-op, official defaults |
 | test | `upgrade test` | the previously published images and real PostgreSQL 16 / 17 data directories are taken over by the new image, see above |
@@ -274,9 +274,9 @@ service's environment and volume, not Docker networking or port publishing.
 | Setting | Needed for | Notes |
 | --- | --- | --- |
 | Container registry enabled | staging | default on gitlab.com; add a [cleanup policy](https://docs.gitlab.com/user/packages/container_registry/reduce_container_registry_storage/) for tags matching `ci-.*` |
-| `DOCKERHUB_USERNAME` | publishing | Docker Hub account |
-| `DOCKERHUB_TOKEN` | publishing | Docker Hub access token, **masked** + protected |
-| `VERSIONS_PUSH_TOKEN` | the weekly schedule | project access token, `api` + `write_repository`, Maintainer, allowed to push to the protected default branch; the schedule fails without it |
+| `FNOX_AGE_KEY_FILE` (scope `release/publish`) | publishing | **File** variable, protected + masked: the `publish` tier's age identity, which decrypts the Docker Hub credentials (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) from `fnox.toml` — [docs/SECRETS.md](docs/SECRETS.md) |
+| `FNOX_AGE_KEY_FILE` (scope `release/versions`) | the weekly schedule | the same for the `versions` tier: `VERSIONS_PUSH_TOKEN`, a project access token (`api` + `write_repository`, Maintainer, allowed to push to the protected default branch); the schedule fails without it |
+| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `VERSIONS_PUSH_TOKEN` | the same jobs, **until** the fnox keys exist | the plain variables (token masked + protected) the jobs read while no `FNOX_AGE_KEY_FILE` is set; deleted once fnox is set up (docs/SECRETS.md, "Setting it up") |
 | `BUILDKIT_CA`, `BUILDKIT_CERT`, `BUILDKIT_KEY` | build + tests on branches / MRs | **File** variables: the Mac's branch BuildKit server CA and client certificate + key (1Password "Kirbo Mini BuildKit branch mTLS"); not protected |
 | `BUILDKIT_PROTECTED_CA`, `BUILDKIT_PROTECTED_CERT`, `BUILDKIT_PROTECTED_KEY` | build + tests on the default branch | **File** variables, **protected**: the protected BuildKit server's (1Password "Kirbo Mini BuildKit protected mTLS"); the client certificates expire 2029-02-08 |
 | "Kirbo Mini Protected" runner | default-branch pipelines | the ref-protected `macos-protected` Docker runner, assigned to the project |
@@ -287,23 +287,33 @@ credentials, to match the other KirboDev image repositories.
 `VERSIONS_PUSH_TOKEN` lives in 1Password ("PostgreSQL PostGIS TimescaleDB - GitLab API Token",
 Personal vault, with its expiry in the `expires` field). `mise run gitlab:rotate-pat` (or
 `scripts/rotate-gitlab-pat.sh`) rotates it through GitLab's self-rotate endpoint, writes the new
-token and expiry back to 1Password and updates the CI/CD variable — the same script the other
-KirboDev repositories carry, so one command per project keeps every token current.
+token and expiry back to 1Password, re-encrypts it into `fnox.toml` once that holds it (commit
+and push that at once), and updates the plain CI/CD variable while it still exists — the same
+script the other KirboDev repositories carry, so one command per project keeps every token
+current.
+
+Secrets: [docs/SECRETS.md](docs/SECRETS.md) — who can read what, the one-time key setup
+(`scripts/secrets.sh init-keys`), rotation.
 
 ## Developing
 
 ```bash
-mise install                                                 # shellcheck + hadolint, pinned
+mise install       # shellcheck, hadolint, jq, fnox, age, trivy, glab — exact pins, mise.lock
 sh scripts/docker-buildx-release.sh local                    # builds postgresql-postgis-timescaledb:local
 # The test suites, on the current buildx builder (Docker Desktop's default one sees local images;
 # any other takes the image as oci-layout://DIR@sha256:...):
 sh scripts/buildkit-test.sh smoke docker-image://postgresql-postgis-timescaledb:local
 sh scripts/buildkit-test.sh upgrade docker-image://postgresql-postgis-timescaledb:local   # ~15 min
 sh scripts/buildkit-test.sh compose docker-image://postgresql-postgis-timescaledb:local  # needs jq
-mise exec -- shellcheck -S warning scripts/*.sh init-*.sh tests/run.sh
+mise exec -- shellcheck -S warning scripts/*.sh ci/*.sh init-*.sh tests/run.sh
 mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh scripts/output.sh tests/lib.sh tests/smoke.sh tests/compose.sh tests/upgrade.sh
 mise exec -- hadolint Dockerfile tests/Dockerfile
+docker buildx build --check .                                # BuildKit's build checks: no warnings
 ```
+
+The toolchain is pinned exactly in [`mise.toml`](mise.toml) and locked (URL + sha256 per platform)
+in `mise.lock`; CI installs from the lock only (`mise install --locked`). After bumping a pin, run
+`mise lock` and commit both files — the `mise lock` CI job fails a lock that lags behind.
 
 ---
 

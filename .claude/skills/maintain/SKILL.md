@@ -1,6 +1,6 @@
 ---
 name: maintain
-description: Full maintenance pass — check the auto-update machinery is healthy (schedule, runner, token, resolver), bump tool/CI-image pins, reconcile version drift, docs and memories, verify with a local build + tests, report, commit. Use when the user runs /maintain or asks for a maintenance/housekeeping pass.
+description: Full maintenance pass — check the auto-update machinery is healthy (schedule, runner, token, resolver, secrets wiring), bump tool/CI-image/mise.lock pins, reconcile version drift, docs and memories, verify with a local build + tests, report, commit. Use when the user runs /maintain or asks for a maintenance/housekeeping pass.
 disable-model-invocation: true
 ---
 
@@ -17,11 +17,13 @@ This repo has no package manager. Its "dependencies" are:
 | PostgreSQL / PostGIS / TimescaleDB / base image digest | `versions.env` (+ README markers) | the weekly schedule (`scripts/commit-versions.sh`), never you by hand unless the schedule is broken |
 | Resolver search bounds | `versions.env` `MIN_PG_MAJOR` / `MAX_PG_MAJOR` / `DEBIAN_SUITE` / `PLATFORMS` | you |
 | Bare-`docker build` defaults | `Dockerfile` `ARG PG_VERSION` / `POSTGIS_VERSION` / `TIMESCALEDB_VERSION` / `MIN_UPGRADE_FROM_MAJOR` | you (nothing syncs them) |
-| Local lint toolchain | `mise.toml` `[tools]` (shellcheck, hadolint) | you |
+| Toolchain | `mise.toml` `[tools]` (shellcheck, hadolint, jq, fnox, age, trivy, glab), exact pins, locked per platform in `mise.lock` | you — bump the pin, then `mise lock` (the `mise lock` CI job fails a lagging lock) |
+| CI's mise itself | `ci/install-mise.sh` (`MISE_VERSION` + the two musl sha256s) | you — the RE-PIN recipe in its header; keep it ≥ `mise.toml` `min_version` |
+| CI secrets | `fnox.toml` (age ciphertext; profiles `publish`, `versions`) + one `FNOX_AGE_KEY_FILE` per environment (`release/publish`, `release/versions`); plain `DOCKERHUB_*` / `VERSIONS_PUSH_TOKEN` variables until the keys exist | the owner — `scripts/secrets.sh` (docs/SECRETS.md) |
 | CI job images | `.gitlab-ci.yml` (`docker:<ver>-cli`, `alpine:<ver>`, `koalaman/shellcheck-alpine:v<ver>`, `hadolint/hadolint:v<ver>-alpine`, `aquasec/trivy:<ver>`), each **`tag@sha256:digest`** | you — a release at least **7 days old**, never a floating tag (Phase 3.2) |
 | BuildKit client certificates | CI/CD **File** variables `BUILDKIT_CA/CERT/KEY` (branch server) + `BUILDKIT_PROTECTED_CA/CERT/KEY` (protected), from 1Password "Kirbo Mini BuildKit branch mTLS" / "Kirbo Mini BuildKit protected mTLS" | the owner — they expire **2029-02-08** (CAs 2036-11-03); rotation: "Rotating the certificates" in `~/Documents/Claude/GitLab/BuildKit.md` (the Mac setup notes) |
-| TimescaleDB apt signing key | fetched in the `Dockerfile` from packagecloud | upstream — you check it has not expired/rotated |
-| `VERSIONS_PUSH_TOKEN` | 1Password item + CI variable | `mise run gitlab:rotate-pat` |
+| TimescaleDB apt signing key | fetched in the `Dockerfile` from packagecloud, checked against `ARG TIMESCALEDB_SIGNING_FINGERPRINT` | upstream — you check it has not expired/rotated |
+| `VERSIONS_PUSH_TOKEN` | 1Password item + `fnox.toml` profile `versions` (once set up) / the plain CI variable (until then) | `mise run gitlab:rotate-pat` |
 
 **Hard rules**
 - **Never run `scripts/commit-versions.sh` locally** — it rewrites `versions.env` and **pushes to
@@ -29,6 +31,16 @@ This repo has no package manager. Its "dependencies" are:
   playing it (outward-facing: ask first).
 - **Never run `scripts/rotate-gitlab-pat.sh` / `mise run gitlab:rotate-pat` without asking** — it
   revokes the live token the instant it rotates.
+- **Secrets (docs/SECRETS.md):** never decrypt or print a fnox value (`fnox get` / `export`), and
+  never run `scripts/secrets.sh init-keys` / `rotate` / `sync-ci` without asking — they create keys,
+  1Password items and GitLab variables. `fnox.toml` changes only through `scripts/secrets.sh`, never
+  by hand. A fnox value is NOT masked in job logs: no `set -x`, no echo, tokens only through stdin
+  or a credential helper (never a URL). Never re-create a plain `DOCKERHUB_*` /
+  `VERSIONS_PUSH_TOKEN` variable once the secret lives in fnox.
+- **Never suppress a check** (`# hadolint ignore`, `# shellcheck disable`, `# check=skip`) to make a
+  warning go away when the code can be fixed: BuildKit's `SecretsUsedInArgOrEnv` matches on
+  ARG/ENV *names*, so a public value is named without `KEY`/`TOKEN`/`SECRET`/`PASSWORD`
+  (`TIMESCALEDB_SIGNING_FINGERPRINT`).
 - No version table, no Renovate config — package existence is the compatibility matrix (see memory
   `postgresql-postgis-timescaledb-autoupdate`).
 - The schedule pushes to `main` on its own: `git pull --ff-only` before starting and before
@@ -78,7 +90,14 @@ This repo has no package manager. Its "dependencies" are:
    -enddate`, same for the branch item — a certificate, not a secret). < 90 days left → report it;
    the rotation is the owner's (new pair from the CA, the Mac's server files, both projects' File
    variables).
-6. **Docker Hub matches git**: `docker buildx imagetools inspect
+6. **Secrets wiring**: `grep -c age1placeholder fnox.toml` — non-zero means the fnox keys are still
+   not set up (the jobs run on the plain variables; report it as waiting on the owner, with
+   docs/SECRETS.md "Setting it up"). Once set up: `glab variable list --repo
+   KirboDev/agentic-coding/postgresql-postgis-timescaledb` (names and scopes only) must show
+   `FNOX_AGE_KEY_FILE` for `release/publish` and `release/versions`; the last `publish image` log
+   says `secrets: loaded fnox profile 'publish'`; leftover plain `DOCKERHUB_*` /
+   `VERSIONS_PUSH_TOKEN` variables are a report item (delete them once fnox has run green).
+7. **Docker Hub matches git**: `docker buildx imagetools inspect
    docker.io/kirbownz/postgresql-postgis-timescaledb:latest` — its `org.opencontainers.image.description`
    / tag set should be what `versions.env` says. A mismatch means the last publish failed.
 
@@ -114,8 +133,13 @@ This repo has no package manager. Its "dependencies" are:
 
 ## Phase 3 — Apply
 
-1. **mise tools**: `mise outdated` / `mise latest shellcheck` / `mise latest hadolint`; bump
-   `mise.toml` to the latest stable, `mise install`.
+1. **mise tools**: `mise outdated` / `mise latest <tool>`; bump `mise.toml` to the latest stable
+   (at least a day old — `minimum_release_age`), `mise install`, then **`mise lock`** (set
+   `MISE_GITHUB_TOKEN` if GitHub's anonymous API limit bites — a half-written lock skips the tools
+   it could not reach, so check every tool has all five `platforms.*` entries) and commit
+   `mise.toml` + `mise.lock` together. `shellcheck`, `hadolint` and `trivy` move in lockstep with
+   their CI images (2. below). Re-pin `ci/install-mise.sh` when a newer mise is wanted (its header
+   has the recipe).
 2. **CI images** — every `image:` in `.gitlab-ci.yml` is `name:<version>@sha256:<digest>`. For each,
    find the newest release (Docker Hub tags API, `?ordering=last_updated`) that is **at least 7 days
    old** (a fresh release has had no time to be pulled back or fixed); never a moving tag (`latest`,
@@ -140,9 +164,11 @@ This repo has no package manager. Its "dependencies" are:
 Run all of these; Docker must be running.
 
 ```
-mise exec -- shellcheck -S warning scripts/*.sh init-*.sh tests/run.sh
+mise install --locked --dry-run          # the lock covers every pin (the CI `mise lock` job)
+mise exec -- shellcheck -S warning scripts/*.sh ci/*.sh init-*.sh tests/run.sh
 mise exec -- shellcheck -S warning -s bash docker-entrypoint-ppt.sh scripts/output.sh tests/lib.sh tests/smoke.sh tests/compose.sh tests/upgrade.sh
 mise exec -- hadolint Dockerfile tests/Dockerfile
+docker buildx build --check .            # BuildKit's build checks: "no warnings found"
 glab ci lint .gitlab-ci.yml
 # resolver: Phase 2.1 again, if Phase 3 touched versions.env or the resolver
 sh scripts/docker-buildx-release.sh local
@@ -188,7 +214,11 @@ $LAST..HEAD -- . ':!versions.env'`. Verify every claim in `README.md` against th
   writing", "TimescaleDB 2.29") — reword to not go stale, or update;
 - the knobs table vs the `PPT_*` variables `docker-entrypoint-ppt.sh` actually reads;
 - the pipeline table vs the jobs in `.gitlab-ci.yml`; the CI/CD settings table vs the variables the
-  jobs actually require (incl. the six `BUILDKIT_*` File variables and the protected runner);
+  jobs actually require (incl. the six `BUILDKIT_*` File variables, the `FNOX_AGE_KEY_FILE` per
+  environment and the protected runner);
+- `docs/SECRETS.md` vs `fnox.toml` (profiles, providers, recipients' labels), `scripts/secrets.sh`
+  (tiers) and the jobs' `environment:` names; drop its "transition" notes once the plain variables
+  are gone;
 - the test stages in `tests/Dockerfile` ⇄ the expected step lists in `scripts/buildkit-test.sh`
   ⇄ the `no-cache-filter` lists in `tests/docker-bake.hcl`; the README "Tests" fidelity notes ⇄
   what `tests/lib.sh` actually emulates;
@@ -218,6 +248,6 @@ Report to the user:
 
 Then `git pull --ff-only` and commit in logical units (Conventional Commits, `Co-Authored-By`
 trailer): tooling pins (`chore(tooling): …`), CI changes and CI image pins (`ci: …`), test changes
-(`test: …`), Dockerfile defaults/bounds
+(`test: …`), secrets wiring (`ci(secrets): …`), Dockerfile defaults/bounds
 (`chore: …`), resolver/script fixes (`fix(…): …`), docs (`docs: …`). Leave `versions.env`
 version pins to the schedule. **Never push** — the user pushes, and a push to `main` publishes.

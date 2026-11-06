@@ -136,12 +136,18 @@ Work every item by reading the actual code. The list is a floor — flag unliste
 - [ ] Image defaults: `docker-compose.yml` ships `homeassistant/homeassistant` and publishes
       `5432` on all interfaces — is that clearly labelled as a demo in the README?
 - [ ] Supply chain: base image pinned by digest; apt packages pinned to exact versions; the
-      packagecloud GPG key is fetched over HTTPS at build time **without fingerprint pinning**
-      (assess); every CI job image pinned by version + digest (a tag alone can be re-pointed),
-      above all in jobs that hold `DOCKERHUB_TOKEN` / `VERSIONS_PUSH_TOKEN` / the protected
-      BuildKit client certificate; the `apk add` in jobs (unpinned packages) — which jobs, which secrets.
-- [ ] Secrets: `VERSIONS_PUSH_TOKEN` in the `git push` URL (could it reach the log on failure?),
-      masked + protected flags, which branches/triggers can read each secret, `PUBLISH` manual runs
+      packagecloud GPG key is fetched over HTTPS at build time and checked against
+      `TIMESCALEDB_SIGNING_FINGERPRINT` (does a mismatch really fail the build?); every CI job
+      image pinned by version + digest (a tag alone can be re-pointed), above all in jobs that
+      hold `DOCKERHUB_TOKEN` / `VERSIONS_PUSH_TOKEN` / the protected BuildKit client certificate;
+      the mise those jobs run (`ci/install-mise.sh`: pinned + sha256) and the tools it installs
+      (`mise.lock`, locked mode); the `apk add` in jobs (unpinned packages) — which jobs, which secrets.
+- [ ] Secrets (docs/SECRETS.md): fnox values are NOT masked in job logs — any `set -x`, echo, or
+      token in a URL/argv (`VERSIONS_PUSH_TOKEN` reaches `git push` through a credential helper:
+      could it still reach the log?); each `FNOX_AGE_KEY_FILE` protected + scoped to one
+      environment, and each fnox provider encrypting to the maintainer + only its tier; the
+      transition fallback to plain variables (`ci/secrets.sh`) — can a job without an identity read
+      something it should not? Which branches/triggers can read each secret, `PUBLISH` manual runs
       from non-default branches. Rotation scripts keep secrets off argv (`ps`-safe) as they claim.
 - [ ] Provenance/SBOM actually present on the published manifest; the "retry without
       attestations" fallback in `docker-buildx-release.sh` — is its use visible, or silent?
