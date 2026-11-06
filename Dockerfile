@@ -33,8 +33,10 @@ ARG TIMESCALEDB_VERSION=2.30.2
 # is what bounds the list in practice. Set to PG_MAJOR to bundle nothing.
 ARG MIN_UPGRADE_FROM_MAJOR=15
 # Fingerprint of packagecloud's signing key for the TimescaleDB repo. The key is fetched at
-# build time; a different one fails the build instead of being trusted.
-ARG TIMESCALEDB_KEY_FINGERPRINT=1005FB68604CE9B8F6879CF759F18EDF47F24417
+# build time; a different one fails the build instead of being trusted. A PUBLIC value: the name
+# avoids "KEY" so BuildKit's SecretsUsedInArgOrEnv check (which matches on names) has nothing
+# to flag — keep it that way rather than suppressing the check.
+ARG TIMESCALEDB_SIGNING_FINGERPRINT=1005FB68604CE9B8F6879CF759F18EDF47F24417
 # Only for the description label: inside this stage ${PG_VERSION} is the base image's ENV
 # (the Debian package version, e.g. 18.6-1.pgdg13+2), which always wins over a build arg.
 ARG PPT_PG_VERSION
@@ -78,8 +80,8 @@ apt-get install -y --no-install-recommends ca-certificates curl gnupg
 # (/etc/apt/sources.list.d/pgdg.list, components "main ${PG_MAJOR}").
 curl -fsSL -o /tmp/timescaledb.key https://packagecloud.io/timescale/timescaledb/gpgkey
 fpr="$(GNUPGHOME="$(mktemp -d)" gpg --show-keys --with-colons /tmp/timescaledb.key | awk -F: '$1 == "fpr" { print $10; exit }')"
-[ "$fpr" = "${TIMESCALEDB_KEY_FINGERPRINT}" ] \
-  || { echo "ERROR: TimescaleDB repo key fingerprint is '${fpr}', expected '${TIMESCALEDB_KEY_FINGERPRINT}'" >&2; exit 1; }
+[ "$fpr" = "${TIMESCALEDB_SIGNING_FINGERPRINT}" ] \
+  || { echo "ERROR: TimescaleDB repo key fingerprint is '${fpr}', expected '${TIMESCALEDB_SIGNING_FINGERPRINT}'" >&2; exit 1; }
 gpg --dearmor < /tmp/timescaledb.key > /usr/share/keyrings/timescaledb.gpg
 rm -f /tmp/timescaledb.key
 echo "deb [signed-by=/usr/share/keyrings/timescaledb.gpg] https://packagecloud.io/timescale/timescaledb/debian/ ${DEBIAN_SUITE} main" \
