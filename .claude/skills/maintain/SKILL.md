@@ -95,8 +95,8 @@ This repo has no package manager. Its "dependencies" are:
    docs/SECRETS.md "Setting it up"). Once set up: `glab variable list --repo
    KirboDev/agentic-coding/postgresql-postgis-timescaledb` (names and scopes only) must show
    `FNOX_AGE_KEY_FILE` for `release/publish` and `release/versions`; the last `publish image` log
-   says `secrets: loaded fnox profile 'publish'`; leftover plain `DOCKERHUB_*` /
-   `VERSIONS_PUSH_TOKEN` variables are a report item (delete them once fnox has run green).
+   says `secrets: loaded fnox profile 'publish'`; a plain `DOCKERHUB_*` / `VERSIONS_PUSH_TOKEN`
+   variable reappearing is a report item (all were deleted 2026-11-07; fnox is the only source).
 7. **Docker Hub matches git**: `docker buildx imagetools inspect
    docker.io/kirbownz/postgresql-postgis-timescaledb:latest` — its `org.opencontainers.image.description`
    / tag set should be what `versions.env` says. A mismatch means the last publish failed.

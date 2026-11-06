@@ -8,11 +8,11 @@ in [`mise.toml`](../mise.toml) and locked in `mise.lock`.
 
 Contributors need none of this: building and testing the image use no secrets.
 
-> **Status: transition.** `fnox.toml` is wired but holds no keys yet (its recipients are
-> `placeholder`s). Until the maintainer runs the [one-time setup](#setting-it-up-once), the same
-> jobs keep reading the plain GitLab CI/CD variables `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` and
-> `VERSIONS_PUSH_TOKEN`, exactly as before. Once a tier's key is in GitLab, its job reads fnox,
-> and fnox's values win over any plain variable of the same name.
+> **Status: done (2026-11-07).** Every CI secret comes from `fnox.toml`. Both tiers ran green on
+> fnox — `publish image` (`publish`) and the weekly `check upstream versions` (`versions`,
+> pipeline 3038738426, after its token was re-sealed: the first fnox run had found the revoked
+> 2026-09 token) — and the plain `DOCKERHUB_*` / `VERSIONS_PUSH_TOKEN` CI/CD variables are deleted.
+> A job without its `FNOX_AGE_KEY_FILE` now fails closed (`ci/secrets.sh`).
 
 ## Who can read what
 
@@ -62,7 +62,7 @@ authenticated `glab`.
    the next scheduled `check upstream versions` reads `versions`.
 4. Once both have run green on fnox, delete the plain `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` and
    `VERSIONS_PUSH_TOKEN` CI/CD variables (Settings → CI/CD → Variables), and drop the transition
-   notes here and in `ci/secrets.sh`.
+   notes here and in `ci/secrets.sh`. (Done 2026-11-07.)
 
 On another maintainer machine, only `scripts/secrets.sh setup` is needed.
 

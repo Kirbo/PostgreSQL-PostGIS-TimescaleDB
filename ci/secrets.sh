@@ -9,10 +9,8 @@
 # fnox decrypts with it. fnox and age (whose age-plugin-pq fnox needs for the post-quantum keys)
 # come from mise.lock in locked mode, through the pinned mise of ci/install-mise.sh.
 #
-# TRANSITION: until the keys exist (scripts/secrets.sh init-keys), a job has no FNOX_AGE_KEY_FILE
-# and secrets_load leaves the job on its plain GitLab CI/CD variables (DOCKERHUB_USERNAME,
-# DOCKERHUB_TOKEN, VERSIONS_PUSH_TOKEN), which the job then checks as before. Once a tier's key
-# is in GitLab its job reads fnox, and fnox's values win over any plain variable of the same name.
+# There are no plain CI/CD secret variables any more (removed 2026-11-07 once both tiers had run
+# green on fnox): a job without its identity fails here, closed, instead of falling back.
 #
 # GitLab masks none of the fnox values in the job log (they are not GitLab variables): never
 # `set -x`, never echo them.
@@ -24,8 +22,8 @@ export FNOX_NON_INTERACTIVE=true
 # values yet: both are bugs to fix, not to fall back from).
 secrets_load() {
   if [ -z "${FNOX_AGE_KEY_FILE:-}" ]; then
-    echo "secrets: no FNOX_AGE_KEY_FILE for environment ${CI_ENVIRONMENT_NAME:-none}: using the plain CI/CD variables (docs/SECRETS.md, transition)"
-    return 0
+    echo "secrets: no FNOX_AGE_KEY_FILE for environment ${CI_ENVIRONMENT_NAME:-none} — this job needs its tier's identity (docs/SECRETS.md, scripts/secrets.sh sync-ci)" >&2
+    exit 1
   fi
   if ! command -v mise >/dev/null 2>&1; then
     sh ci/install-mise.sh || exit 1
