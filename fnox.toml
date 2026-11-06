@@ -1,0 +1,38 @@
+# CI secrets of this repo (https://fnox.jdx.dev). Every value is age CIPHERTEXT: change one with
+# `scripts/secrets.sh set <profile> <NAME>`, never by hand.
+#
+# Recipients are PUBLIC keys. Each provider encrypts to the maintainer plus only the CI tier
+# named on it, so the provider a secret uses decides who can read it:
+#   maintainer   1Password "PostgreSQL PostGIS TimescaleDB fnox keys"; locally the OS keychain via
+#                the generated fnox.local.toml (`scripts/secrets.sh setup`)
+#   publish      GitLab File variable FNOX_AGE_KEY_FILE, environment release/publish, protected
+#   versions     GitLab File variable FNOX_AGE_KEY_FILE, environment release/versions, protected
+# No identity lives in this file. Post-quantum (age1pq1…) keys reach fnox through age-plugin-pq,
+# which ships with mise's age. docs/SECRETS.md has the design.
+#
+# The `placeholder` recipients below stand until `scripts/secrets.sh init-keys` replaces them
+# with real keys; until then the profiles hold no values and CI uses the plain GitLab variables.
+#
+# Secrets live only in profiles (one per tier); CI loads them with `--no-defaults -P <profile>`
+# (ci/secrets.sh).
+if_missing = "error"
+
+[providers.age_publish]  # Docker Hub: the `publish image` job
+type = "age"
+recipients = [
+  "age1placeholder-maintainer", # maintainer
+  "age1placeholder-publish", # publish
+]
+
+[providers.age_versions]  # repo write: the scheduled `check upstream versions` job
+type = "age"
+recipients = [
+  "age1placeholder-maintainer", # maintainer
+  "age1placeholder-versions", # versions
+]
+
+[profiles]
+
+[profiles.publish]
+
+[profiles.versions]

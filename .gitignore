@@ -7,3 +7,6 @@ pinned.env
 auto.env
 audit-report.md
 test-results/
+
+# Generated per maintainer machine by scripts/secrets.sh (points fnox at the keychain)
+fnox.local.toml

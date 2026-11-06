@@ -10,7 +10,8 @@
 # picked up as a changed PG_IMAGE_DIGEST, i.e. as a commit like any other.
 #
 # Needs VERSIONS_PUSH_TOKEN (project access token, api + write_repository, allowed to push to
-# the protected default branch) — the CI job token cannot push.
+# the protected default branch; from the fnox profile `versions` or the plain CI variable —
+# docs/SECRETS.md) — the CI job token cannot push.
 set -eu
 # shellcheck source=scripts/output.sh
 . "$(dirname "$0")/output.sh"
@@ -113,8 +114,14 @@ Resolved from upstream by scheduled pipeline ${CI_PIPELINE_ID:-local}; the pipel
 commit builds, tests and publishes it."
 
 # No ci.skip on purpose: this push IS what triggers the build of the new versions.
-git push \
-  "https://oauth2:${VERSIONS_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
-  "HEAD:${CI_DEFAULT_BRANCH}"
+# The token reaches git through a credential helper that reads it from the environment — never
+# in the URL or argv, so no git message can print it (GitLab cannot mask it when it comes from
+# fnox, ci/secrets.sh). The URL keeps the `oauth2@` user: it selects the token login, and no
+# runner-set `url.<…>.insteadOf https://<host>` rewrite (to the job token) can match it.
+# The \$ stays literal here: git's helper shell expands it, at push time.
+helper="!f() { echo username=oauth2; echo \"password=\${VERSIONS_PUSH_TOKEN}\"; }; f"
+export VERSIONS_PUSH_TOKEN
+git -c credential.helper= -c credential.helper="${helper}" \
+  push "https://oauth2@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "HEAD:${CI_DEFAULT_BRANCH}"
 section "pushed to ${CI_DEFAULT_BRANCH}; its pipeline will build and publish these versions"
 emit true

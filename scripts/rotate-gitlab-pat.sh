@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Self-rotate the GitLab access token used for this project's CI/CD + API automation, then write the
-# new token back to 1Password and into the VERSIONS_PUSH_TOKEN CI/CD variable. The token rotates
+# new token back to 1Password and to where CI reads it: the fnox profile `versions` (fnox.toml) once
+# it holds the token, and the VERSIONS_PUSH_TOKEN CI/CD variable while that still exists. The token rotates
 # ITSELF (the `self/rotate` endpoint), so the old value is revoked the instant the new one is issued —
 # run this before the `expires` date in the 1Password item (the item is the expiry tracker).
 #
@@ -110,13 +111,26 @@ fi
 
 echo "Token rotated and saved to 1Password (expires ${EXPIRES_AT})."
 
-# --- Mirror the new token into the VERSIONS_PUSH_TOKEN CI/CD variable -------------------------------
+# --- Mirror the new token to where CI reads it ------------------------------------------------------
 # The weekly `check upstream versions` job pushes the version-bump commit with VERSIONS_PUSH_TOKEN, so
-# it must track the rotated token or the schedule breaks. Auth with the NEW token itself (valid
-# immediately post-rotation). Non-fatal: the token is already safe in 1Password, so a CI hiccup
-# shouldn't fail the rotation — re-run after fixing access. gitlab-set-ci-var.sh updates only the
-# value, preserving the variable's existing masking/protection.
-if ! GITLAB_PAT="${NEW_TOKEN}" CI_VAR_KEY="VERSIONS_PUSH_TOKEN" CI_VAR_VALUE="${NEW_TOKEN}" \
+# it must track the rotated token or the schedule breaks. CI reads it from the fnox profile `versions`
+# (fnox.toml, docs/SECRETS.md) once that holds it, else from the plain CI/CD variable (the transition).
+# Both non-fatal: the token is already safe in 1Password, so re-run the failed step by hand.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if grep -q '^VERSIONS_PUSH_TOKEN' "${ROOT}/fnox.toml" 2>/dev/null; then
+  if printf '%s' "${NEW_TOKEN}" | "${ROOT}/scripts/secrets.sh" set versions VERSIONS_PUSH_TOKEN >/dev/null; then
+    echo "fnox.toml: VERSIONS_PUSH_TOKEN re-encrypted. COMMIT AND PUSH fnox.toml now — the schedule reads"
+    echo "  the token from the default branch, and the old one is already revoked."
+  else
+    echo "WARNING: the new token is saved in 1Password, but writing it into fnox.toml failed — run" >&2
+    echo "         'op read … | scripts/secrets.sh set versions VERSIONS_PUSH_TOKEN', then commit and push." >&2
+  fi
+fi
+# The plain variable is updated while it exists, never re-created: once the secret lives in fnox,
+# deleting the variable is the last step of the migration (docs/SECRETS.md). Auth with the NEW token
+# itself (valid immediately post-rotation). gitlab-set-ci-var.sh updates only the value, preserving
+# the variable's existing masking/protection.
+if ! GITLAB_PAT="${NEW_TOKEN}" CI_VAR_KEY="VERSIONS_PUSH_TOKEN" CI_VAR_VALUE="${NEW_TOKEN}" CI_VAR_UPDATE_ONLY=1 \
     "$(dirname "$0")/gitlab-set-ci-var.sh"; then
   echo "WARNING: the new token is saved in 1Password, but updating the VERSIONS_PUSH_TOKEN CI/CD variable" >&2
   echo "         failed — set it manually in the project's CI/CD settings or re-run after fixing access." >&2

@@ -9,6 +9,8 @@ set -euo pipefail
 #   CI_VAR_KEY     (required) — variable name, e.g. VERSIONS_PUSH_TOKEN.
 #   CI_VAR_VALUE   (required) — the value to store.
 #   CI_PROJECT_ID  (optional) — defaults to 86056054 (postgresql-postgis-timescaledb).
+#   CI_VAR_UPDATE_ONLY (optional) — "1": update the variable if it exists, never create it (a
+#                  secret that moved to fnox.toml must not be resurrected as a plain variable).
 #   GITLAB_API     (optional) — defaults to https://gitlab.com/api/v4.
 #
 # CREATE: sets the value masked + protected + raw + scope '*'. Protected = only pipelines on protected
@@ -73,6 +75,10 @@ if [[ "${CUR_CODE}" == "200" ]]; then
     fail "${CODE}" "${BODY}"
   fi
   [[ "${CODE}" -ge 200 && "${CODE}" -lt 300 ]] || fail "${CODE}" "${BODY}"
+
+elif [[ "${CUR_CODE}" == "404" && "${CI_VAR_UPDATE_ONLY:-}" == "1" ]]; then
+  echo "CI/CD variable ${CI_VAR_KEY} does not exist; not creating it (CI_VAR_UPDATE_ONLY=1)."
+  exit 0
 
 elif [[ "${CUR_CODE}" == "404" ]]; then
   # --- CREATE: masked + protected by default, with an unmasked fallback. ---
