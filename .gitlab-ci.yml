@@ -1,7 +1,10 @@
 # Build, test and publish the PostgreSQL + PostGIS + TimescaleDB image.
 #
-# WHERE IT RUNS: the "Kirbo Mini" Mac Mini runner (docker executor, tag `macos`), never a
-# metered SaaS runner — `default: tags: [macos]` puts every job there. The docker jobs talk to
+# WHERE IT RUNS: the "Kirbo Mini" Mac Mini, never a metered SaaS runner. Every job takes the
+# runner tag in $MAC_DOCKER (`default: tags` below): `macos` — the shared Docker runner — for
+# branches and merge requests, `macos-protected` — a ref-protected Docker runner with its own
+# cache, which only protected-ref jobs reach — for pipelines of the default branch (push, web,
+# schedule), which hold the Docker Hub and repo-write tokens. The docker jobs talk to
 # the host's Docker Desktop daemon through the mounted socket (DOCKER_HOST below), the same
 # way the electrolux-to-mqtt pipeline does; there is no docker-in-docker service.
 #
@@ -45,11 +48,19 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS"
       when: never
+    # The default branch — its push, web ("Run pipeline") and schedule pipelines all carry
+    # CI_COMMIT_BRANCH, so this rule catches every one of them — runs on the protected runner.
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+      variables:
+        MAC_DOCKER: macos-protected
     - if: "$CI_COMMIT_BRANCH"
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
+  # The Mac Docker runner tag: `macos-protected` on the default branch (workflow rules above),
+  # the shared `macos` runner everywhere else.
+  MAC_DOCKER: "macos"
   # Docker Hub target. Change DOCKERHUB_REPOSITORY here (or as a CI/CD variable) to publish
   # somewhere else — nothing else in the repo hardcodes it.
   DOCKER_REGISTRY: docker.io
@@ -63,7 +74,7 @@ variables:
 
 default:
   tags:
-    - macos
+    - $MAC_DOCKER
   interruptible: true
 
 # --- shared bits -------------------------------------------------------------------------
