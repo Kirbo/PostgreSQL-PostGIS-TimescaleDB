@@ -1,0 +1,8 @@
+# Build context of tests/Dockerfile (the repository root; the root .dockerignore is the image's):
+# the test scripts, the versions they expect, and the Dockerfile whose HEALTHCHECK they run.
+*
+!tests/
+!scripts/output.sh
+!versions.env
+!build.env
+!Dockerfile

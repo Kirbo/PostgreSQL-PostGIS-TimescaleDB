@@ -7,3 +7,4 @@ pinned.env
 auto.env
 compose-*.override.yml
 audit-report.md
+test-results/
