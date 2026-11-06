@@ -1,8 +1,56 @@
-# Local lint toolchain, pinned. CI runs the same tools from their official images.
+# Maintainer + CI toolchain, managed by mise (https://mise.jdx.dev). `mise install` provisions it.
+#
+# EVERY tool is pinned to an exact version, and mise.lock (committed) records each one's download
+# URL + sha256 for every platform in `lockfile_platforms` below. CI installs in LOCKED mode
+# (`mise install --locked`, MISE_LOCKED=1 in .gitlab-ci.yml), so a tool, version or artifact the
+# lock does not name fails the job instead of being fetched. Bump a tool: edit its pin here, then
+# `mise lock`; the CI `mise lock` job fails a lock that disagrees with these pins.
+#
+# Not here, on purpose:
+#   docker + buildx + compose  CI uses the digest-pinned docker:<ver>-cli image (it bundles all
+#                              three); locally the Docker Desktop / OrbStack install provides them
+#                              together with the engine the local builds and tests use, and a
+#                              mise-installed CLI would shadow its contexts and plugins.
+#   curl, git, gpg             system tools (CI: Alpine's signed packages in the alpine jobs).
+#   op                         the 1Password CLI, installed with the desktop app it talks to.
+#   git-cliff                  n/a: the image is versioned by its upstream components
+#                              (versions.env), not by commits.
+#
+# Requires a trusted config (`mise trust`).
+
+# Oldest mise verified with this file and its lock format.
+min_version = "2026.9.9"
+
 [tools]
+# Lint (CI jobs `shellcheck` and `hadolint` run the official images of the SAME versions —
+# /maintain bumps both together).
 shellcheck = "0.11.0"
 hadolint = "2.15.1"
+# The compose test parses `docker compose config` (scripts/buildkit-test.sh); the maintainer
+# scripts read GitLab API responses (scripts/rotate-gitlab-pat.sh, scripts/gitlab-set-ci-var.sh).
+jq = "1.8.2"
+# Secrets (fnox.toml, scripts/secrets.sh, ci/secrets.sh, docs/SECRETS.md). age provides
+# age-keygen and the age-plugin-pq through which fnox reaches the post-quantum keys (age >= 1.3.2).
+fnox = "1.47.0"
+age = "1.3.2"
+# The `vulnerability scan` job's scanner, for the same scan locally (CI runs aquasec/trivy of the
+# SAME version).
+trivy = "0.76.1"
+# scripts/secrets.sh sync-ci and the /maintain survey talk to GitLab through glab.
+glab = "1.128.0"
+
+[settings]
+# mise.lock: kept current by `mise install` / `mise lock`, for every platform a maintainer or CI
+# job installs on: macOS arm64 (maintainer), Linux arm64 (the Mac Mini runner's containers) and
+# Linux x64. The CI jobs run Alpine, hence the musl variants (mise resolves `linux-<arch>-musl`
+# there). No Windows: the repo is shell scripts and a Linux image.
+lockfile = true
+lockfile_platforms = ["linux-arm64", "linux-arm64-musl", "linux-x64", "linux-x64-musl", "macos-arm64"]
+# Release-age quarantine: a version request mise RESOLVES (`mise upgrade --bump`, `mise latest`)
+# skips anything published in the last day. Exact pins and locked versions are not filtered —
+# /maintain checks those by hand (CI job images: at least 7 days old).
+minimum_release_age = "1d"
 
 [tasks."gitlab:rotate-pat"]
-description = "Self-rotate the GitLab project token, save it to 1Password, update the VERSIONS_PUSH_TOKEN CI variable"
+description = "Self-rotate the GitLab project token, save it to 1Password, update VERSIONS_PUSH_TOKEN (fnox.toml, and the plain CI variable while it exists)"
 run = "scripts/rotate-gitlab-pat.sh"
