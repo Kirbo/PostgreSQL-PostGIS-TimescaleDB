@@ -9,9 +9,9 @@ built for `linux/amd64` and `linux/arm64`.
 
 <!-- versions:start -->
 
-* **PostgreSQL 18.6** — [release notes](https://www.postgresql.org/docs/release/)
+* **PostgreSQL 18.7** — [release notes](https://www.postgresql.org/docs/release/)
 * **PostGIS 3.7.0** — [release notes](https://github.com/postgis/postgis/releases/tag/3.7.0)
-* **TimescaleDB 2.31.0** — [release notes](https://github.com/timescale/timescaledb/releases/tag/2.31.0)
+* **TimescaleDB 2.32.0** — [release notes](https://github.com/timescale/timescaledb/releases/tag/2.32.0)
 
 <!-- versions:end -->
 
@@ -32,8 +32,8 @@ packages are held for that step, so the PostgreSQL version stays the one listed 
 | --- | --- |
 | `latest` | the newest build |
 | `18` | newest build of that PostgreSQL major |
-| `18.6` | newest build of that PostgreSQL version |
-| `18.6-postgis3.7.0-timescaledb2.31.0` | that exact version combination |
+| `18.7` | newest build of that PostgreSQL version |
+| `18.7-postgis3.7.0-timescaledb2.32.0` | that exact version combination |
 
 <!-- tags:end -->
 
